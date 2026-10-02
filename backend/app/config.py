@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     trust_proxy_headers:bool=False
     # Empty: SQLite in the data directory. Or e.g. postgresql://user:password@host:5432/knavis (see DEPLOYMENT.md).
     database_url:str=''
+    # Password reset by e-mail appears only when SMTP is configured. PUBLIC_URL is where people open the app (for the link).
+    smtp_host:str=''; smtp_port:int=587; smtp_user:str=''; smtp_password:str=''; smtp_from:str=''; smtp_starttls:bool=True
+    public_url:str=''
+    reset_token_minutes:int=60
     # How many documents are extracted and indexed at once; the rest wait their turn.
     ingestion_concurrency:int=2
     # Spreadsheet analytics: questions that need computing (totals, counts, the highest group) are answered with

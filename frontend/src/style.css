@@ -42,3 +42,5 @@ button,select,textarea{font:inherit}.new,.send{border:0;border-radius:10px;paddi
  .topbar .title small{display:none}
  .chat{padding:20px 14px}.bubble{max-width:92%}.composer{padding:10px 14px 14px}
 }
+
+.notice{color:#8fdcb0;font-size:13px;line-height:1.4}

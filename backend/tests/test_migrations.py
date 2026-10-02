@@ -5,6 +5,12 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 
 
+def head():
+    from alembic.script import ScriptDirectory
+    from app.migrations import alembic_config
+    return ScriptDirectory.from_config(alembic_config()).get_current_head()
+
+
 def fresh_engine(tmp_path, name="m.db"):
     return create_engine(f"sqlite:///{tmp_path / name}")
 
@@ -18,7 +24,7 @@ def test_a_new_database_is_created_by_the_baseline_migration(tmp_path):
     tables = set(inspect(engine).get_table_names())
     assert set(Base.metadata.tables) <= tables and "alembic_version" in tables
     with engine.connect() as c:
-        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0001"
+        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == head()
 
 
 def test_upgrading_twice_changes_nothing(tmp_path):
@@ -62,7 +68,7 @@ def test_a_database_from_before_alembic_is_adopted_with_its_data_intact(tmp_path
     with engine.connect() as c:
         assert c.execute(text("SELECT content FROM messages")).scalar() == "kept message"
         assert c.execute(text("SELECT title FROM sessions")).scalar() == "kept chat"
-        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0001"
+        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == head()
     assert upgrade_database(engine) == "upgraded"                                         # and it is a normal Alembic database now
 
 
@@ -81,7 +87,7 @@ def test_the_active_database_reports_its_dialect_and_is_current():
     """Runs on whichever database the suite uses (SQLite by default, PostgreSQL in CI's second pass)."""
     from app.db import engine
     with engine.connect() as c:
-        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0001"
+        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == head()
     assert engine.dialect.name in ("sqlite", "postgresql")
 
 
@@ -109,3 +115,18 @@ def test_copy_database_refuses_to_copy_onto_itself():
     from app.db import database_url
     with pytest.raises(AdminError):
         copy_database(database_url())
+
+
+def test_a_database_at_an_earlier_revision_is_upgraded_in_place(tmp_path):
+    """An install on revision 0001 gets the later tables without touching its data."""
+    from alembic import command
+    from app.migrations import alembic_config, upgrade_database
+    engine = fresh_engine(tmp_path, "step.db")
+    with engine.begin() as connection:
+        command.upgrade(alembic_config(connection), "0001")
+        connection.execute(text("INSERT INTO users (id, email, password_hash, created_at) VALUES ('u', 'a@b.co', 'x', '2026-01-01')"))
+    assert "password_resets" not in inspect(engine).get_table_names()
+    assert upgrade_database(engine) == "upgraded"
+    assert "password_resets" in inspect(engine).get_table_names()
+    with engine.connect() as c:
+        assert c.execute(text("SELECT email FROM users")).scalar() == "a@b.co"

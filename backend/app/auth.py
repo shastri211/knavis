@@ -17,13 +17,14 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from .models import AuthToken, ChatSession, Document, Job, User
+from . import mailer
+from .models import AuthToken, ChatSession, Document, Job, PasswordReset, User
 from .ratelimit import client_address, enforce
 
 logger = logging.getLogger("mragrag")
@@ -140,6 +141,15 @@ class DeleteAccount(BaseModel):
     password: str
 
 
+class Forgot(BaseModel):
+    email: str
+
+
+class Reset(BaseModel):
+    token: str
+    new_password: str
+
+
 class ChangePassword(BaseModel):
     current_password: str
     new_password: str
@@ -166,7 +176,8 @@ def _session_out(db: Session, user: User) -> dict:
 @router.get("/config")
 def auth_config():
     """What the sign-in screen needs to know before anyone is signed in."""
-    return {"auth_enabled": settings.auth_enabled, "registration_open": settings.auth_enabled and settings.allow_registration}
+    return {"auth_enabled": settings.auth_enabled, "registration_open": settings.auth_enabled and settings.allow_registration,
+            "password_reset": settings.auth_enabled and mailer.configured()}
 
 
 @router.post("/register", status_code=201)
@@ -250,6 +261,44 @@ def set_password(db: Session, user: User, new_password: str, keep_token_id: str 
     revoked = query.delete()
     db.commit()
     return revoked
+
+
+@router.post("/forgot", status_code=202)
+def forgot_password(body: Forgot, request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    """Mail a single-use reset link. The answer is the same whether or not the address has an account."""
+    if not settings.auth_enabled or not mailer.configured():
+        raise HTTPException(501, "Password reset by e-mail is not set up on this server. Ask its administrator to reset it.")
+    email = (body.email or "").strip().lower()
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    enforce("forgot-email", email, 3)   # a few a minute per address, so nobody can use this to spam an inbox
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        db.query(PasswordReset).filter(PasswordReset.user_id == user.id, PasswordReset.used_at.is_(None)).delete()   # only the newest link works
+        db.add(PasswordReset(id=_digest(token), user_id=user.id, expires_at=now + timedelta(minutes=settings.reset_token_minutes)))
+        db.commit()
+        base = (settings.public_url or str(request.base_url)).rstrip("/")
+        background.add_task(mailer.send_quietly, user.email, "Reset your KNAVIS password",
+                            f"Someone asked to reset the password of this KNAVIS account.\n\nOpen this link to choose a new one "
+                            f"(it works once and expires in {settings.reset_token_minutes} minutes):\n\n{base}/#reset={token}\n\n"
+                            "If it was not you, ignore this message: your password is unchanged.")
+    return {"detail": "If that address has an account, a reset link is on its way."}
+
+
+@router.post("/reset", status_code=204)
+def reset_password_with_token(body: Reset, request: Request, db: Session = Depends(get_db)):
+    """Set a new password using a link from the e-mail. Ends every sign-in of the account."""
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    row = db.get(PasswordReset, _digest(body.token or ""))
+    now = datetime.now(timezone.utc)
+    expires = row.expires_at.replace(tzinfo=timezone.utc) if row and row.expires_at.tzinfo is None else (row.expires_at if row else None)
+    user = db.get(User, row.user_id) if row and row.used_at is None and expires > now else None
+    if not user:
+        raise HTTPException(400, "This reset link is invalid or has expired. Ask for a new one.")
+    check_new_password(body.new_password, user.email)
+    row.used_at = now
+    set_password(db, user, body.new_password)
 
 
 @router.post("/password", status_code=204)
