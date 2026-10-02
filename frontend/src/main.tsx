@@ -94,7 +94,7 @@ function App(){
 
   return <div className="shell">
     <aside className="sidebar">
-      <div className="brand">M-RAG <span>v0.3</span></div>
+      <div className="brand">KNAVIS <span>v0.3</span></div>
       <button className="new" onClick={newChat}>＋ New chat</button>
       <div className="section-title">Chats</div>
       <div className="sessions">{sessions.map(x=><button key={x.id} className={active?.id===x.id?"session active":"session"} onClick={()=>selectSession(x)}>{x.title}</button>)}</div>
@@ -104,7 +104,7 @@ function App(){
 
     <main className="main">
       <header className="topbar">
-        <div><strong>{active?.title||"Multimodal Agentic RAG"}</strong><small>Evidence-grounded · multilingual · agentic</small></div>
+        <div><strong>{active?.title||"KNAVIS"}</strong><small>Evidence-grounded · multilingual · agentic</small></div>
         <div className="selectors">
           <select value={provider} onChange={e=>setProvider(e.target.value)}>
             {providers.map(p=><option key={p} value={p}>{p}</option>)}

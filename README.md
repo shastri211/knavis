@@ -1,6 +1,7 @@
-# Multimodal Agentic RAG
+# KNAVIS: Knowledge Navigation Intelligence
 
-A CPU-first FastAPI and React application for evidence-grounded document Q&A.
+A multimodal, multilingual agentic RAG system: a CPU-first FastAPI and React application
+for evidence-grounded document Q&A.
 The live chat path uses a LangGraph hierarchy: Supervisor -> Guardrails ->
 Greeting/Utility/RAG. The RAG specialist has bounded retrieval attempts and
 abstains when its session documents do not provide sufficient evidence.

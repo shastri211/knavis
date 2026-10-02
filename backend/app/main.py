@@ -10,9 +10,9 @@ from .routes.production import router as production_router
 from .routes.finalization import router as finalization_router
 
 app = FastAPI(
-    title="Multimodal Agentic RAG",
+    title="KNAVIS",
     version="0.3.0",
-    description="CPU-first multilingual multimodal evidence-grounded RAG."
+    description="KNAVIS: Knowledge Navigation Intelligence. CPU-first multilingual multimodal evidence-grounded RAG."
 )
 app.add_middleware(
     CORSMiddleware,
@@ -43,4 +43,4 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"name":"Multimodal Agentic RAG","version":"0.3.0","status":"ok"}
+    return {"name":"KNAVIS","version":"0.3.0","status":"ok"}
