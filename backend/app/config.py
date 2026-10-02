@@ -36,10 +36,21 @@ class Settings(BaseSettings):
     trust_proxy_headers:bool=False
     # Empty: SQLite in the data directory. Or e.g. postgresql://user:password@host:5432/knavis (see DEPLOYMENT.md).
     database_url:str=''
+    # Optional virus scanning of uploads with ClamAV (clamd). CLAMAV_REQUIRED=true refuses uploads while it is down.
+    clamav_host:str=''; clamav_port:int=3310; clamav_timeout:float=30.0; clamav_required:bool=False
     # Password reset by e-mail appears only when SMTP is configured. PUBLIC_URL is where people open the app (for the link).
     smtp_host:str=''; smtp_port:int=587; smtp_user:str=''; smtp_password:str=''; smtp_from:str=''; smtp_starttls:bool=True
     public_url:str=''
     reset_token_minutes:int=60
+    # Several processes may share one database. A job is held with a lease the owner keeps renewing; if the owner dies
+    # the lease runs out and another process takes the job over. INGESTION_INLINE=false leaves all processing to
+    # dedicated workers (python -m app.worker); the default runs jobs in the process that received the upload too.
+    job_lease_seconds:int=30
+    job_sweep_seconds:float=15.0
+    job_poll_seconds:float=2.0
+    ingestion_inline:bool=True
+    # Shared rate limits across processes: redis://host:6379/0. Empty: counted in each process separately.
+    redis_url:str=''
     # How many documents are extracted and indexed at once; the rest wait their turn.
     ingestion_concurrency:int=2
     # Spreadsheet analytics: questions that need computing (totals, counts, the highest group) are answered with

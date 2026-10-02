@@ -69,6 +69,47 @@ copies every row (it refuses a database that already has data), and after you se
 index rebuilds itself. Uploaded files, spreadsheet tables and vectors stay where they are (data directory, Qdrant). CI runs
 the whole test suite on PostgreSQL as well as SQLite.
 
+## Virus scanning (optional)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scan.yml up --build
+```
+
+adds ClamAV and sets `CLAMAV_HOST=clamav` and `CLAMAV_REQUIRED=true`: every upload is streamed to the scanner (nothing is written
+first), an infected file is refused with the signature name, and while the scanner is down or still loading its signatures
+(the first start takes a minute or two) uploads are refused with a 503 rather than accepted unscanned. Without
+`CLAMAV_REQUIRED` an unreachable scanner is logged and the upload continues. clamd rejects streams over its `StreamMaxLength`,
+so keep it above `MAX_UPLOAD_MB` (the overlay sets 100M). Any clamd you already run works: set `CLAMAV_HOST` and `CLAMAV_PORT`.
+
+## Password reset by e-mail (optional)
+
+Set `SMTP_HOST`, `SMTP_FROM` (and `SMTP_USER`/`SMTP_PASSWORD`, `SMTP_PORT`, `SMTP_STARTTLS` as your provider needs) and
+`PUBLIC_URL` (where people open the app). The sign-in page then offers "Forgot your password?". Links are single-use, expire
+after `RESET_TOKEN_MINUTES`, only the newest works, and the answer is identical for unknown addresses. Resetting ends every
+sign-in of the account. Without SMTP the link is not offered and the operator CLI is the way.
+
+## Scaling beyond one process (one host)
+
+```bash
+POSTGRES_PASSWORD=choose-one docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build --scale backend=2 --scale worker=2
+```
+
+runs two web processes and two dedicated ingestion workers (`python -m app.worker`) over PostgreSQL, Redis and a Qdrant server:
+
+- **Jobs** are claimed with an atomic update and a short lease that the owner keeps renewing. Each job runs once however many
+  workers race for it; if a worker dies, its lease runs out and another takes the job (a job started three times is failed
+  with a message). `INGESTION_INLINE=false` makes the web processes only enqueue.
+- **Rate limits** are counted in Redis (`REDIS_URL`), so the limit is shared by every web process. If Redis is unreachable
+  requests are allowed and the problem is logged.
+- **Start-up** is serialised (a lock file for SQLite, a PostgreSQL advisory lock otherwise), so processes starting together
+  do not collide on migrations.
+- **Vectors** use a Qdrant server (`QDRANT_URL`); the default on-disk Qdrant belongs to a single process.
+- **Uploads and spreadsheet tables** live in the data volume, which every backend and worker mounts. That works on one host;
+  spreading across hosts needs a shared filesystem or object storage, which this project does not provide.
+
+Verified with this stack: eight uploads through nginx were all indexed with each job run exactly once across two workers, and
+the sign-in limit was shared by the two web processes (429 after the fifth failed attempt in total, not per process).
+
 ## Putting it on the internet
 
 The compose file binds to `127.0.0.1` on purpose. To serve other people:
@@ -97,13 +138,12 @@ The compose file binds to `127.0.0.1` on purpose. To serve other people:
 
 These are real and deliberate for a free-tier, single-host design:
 
-- **One process.** Local Qdrant, the rate limiter and the ingestion worker live in the backend process. Run exactly one
-  worker (the Dockerfile does). Scaling out needs a Qdrant server, a shared rate-limit store (Redis), and a job queue
-  shared between processes; jobs are persisted and resumed after a restart, but only one process runs them.
-- **Spreadsheet tables and uploads stay on local disk** (per-session SQLite files and the data directory), whichever
-  database holds the application data. Back up the data directory as well as the database.
-- **No virus scanning** of uploads, and no e-mail verification or self-service password reset (there is no mail service):
-  a forgotten password is reset by an operator with `python -m app.admin reset-password`.
+- **One host.** The default setup is one process (on-disk Qdrant and an in-process rate limiter). The scale overlay shares
+  work between processes on one host; uploads and spreadsheet tables live in a data volume that all of them mount, so
+  spreading across hosts needs a shared filesystem or object storage that this project does not provide. Back up the data
+  directory as well as the database.
+- **Scanning is opt-in.** ClamAV catches known malware by signature; it does not make a hostile document safe to open elsewhere.
+  There is no e-mail verification of new accounts (only password reset by e-mail, when SMTP is set).
 - **Lexical evidence gate.** Plausible-sounding questions the documents cannot answer can still reach the model, which
   is then told to abstain. `python -m app.evaluation.run` measures this (see `eval/README.md`).
 - **Free-tier terms.** Providers change limits, models and data terms without notice; check them before sending

@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
-from .db import init_db
+import asyncio
+
+from .db import init_db, startup_lock
 from .ingest.store import migrate_legacy_documents
-from .job_runner import recover_unfinished_jobs
+from .job_runner import recover_unfinished_jobs, sweep_forever
 from .reliability.logging import configure, request_id
 from .core_routes import router as core_router
 from .auth import router as auth_router
@@ -54,12 +56,17 @@ async def add_request_id(request, call_next):
     response.headers["X-Request-ID"] = rid
     return response
 
+_sweeper: list = []   # keeps the sweep task alive
+
+
 @app.on_event("startup")
 async def startup():
     configure()
     init_db()
-    migrate_legacy_documents()   # older databases: build chunks from stored evidence once
+    with startup_lock():
+        migrate_legacy_documents()   # older databases: build chunks from stored evidence once
     await recover_unfinished_jobs()   # a restart in the middle of an upload resumes it instead of leaving it queued forever
+    _sweeper.append(asyncio.create_task(sweep_forever(settings.job_sweep_seconds)))   # and so does a worker that dies later
 
 @app.get("/")
 def root():

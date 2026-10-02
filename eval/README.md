@@ -66,6 +66,11 @@ Re-running the aggregation (12) and lookup (15) categories after those two chang
 result with care: the two fixes were made after seeing these very questions, so it shows the fixes work, not that the
 system is 100% accurate on unseen questions.
 
+A complete second live run after Phase 5 (restart-safe jobs, PostgreSQL-capable storage, leases; same model, with embeddings)
+passed **56 of 56**, with 41 model calls (23,119 tokens), exactly 1 call per answerable question, latency p50 2.9 s and
+p95 11.3 s, and the same caveat: these questions have now been seen while tuning, so it shows no regression, not accuracy
+on unseen questions.
+
 | Metric (first full pass) | Value |
 |---|---|
 | answer accuracy | 0.95 (rest of the corpus: 1.00 after the fixes above) |

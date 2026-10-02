@@ -4,7 +4,9 @@ SQLite is the default (a file in the data directory, nothing to install). Set ``
 instead, e.g. ``postgresql://knavis:secret@db:5432/knavis``. The schema is managed by Alembic (``backend/migrations``)
 and brought up to date at start-up by ``init_db``.
 """
-from sqlalchemy import create_engine, event
+import contextlib
+
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import settings
@@ -58,11 +60,32 @@ def get_db():
         s.close()
 
 
+@contextlib.contextmanager
+def startup_lock():
+    """One process at a time runs migrations and start-up repairs, however many are starting together.
+
+    PostgreSQL: a session advisory lock (works across hosts). SQLite: a lock file in the data directory (one host).
+    """
+    if IS_SQLITE:
+        import portalocker
+        with portalocker.Lock(str(settings.data_dir / ".startup.lock"), timeout=180):
+            yield
+        return
+    with engine.connect() as connection:
+        connection.execute(text("SELECT pg_advisory_lock(727400123)"))
+        try:
+            yield
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock(727400123)"))
+            connection.commit()
+
+
 def init_db():
     from . import models  # noqa: F401  (registers every table on Base.metadata)
     from .migrations import upgrade_database
     from .retrieval import fts
-    upgrade_database(engine)
-    with SessionLocal() as db:
-        fts.ensure_table(db)
-        fts.rebuild_if_stale(db)   # databases from before the keyword index existed
+    with startup_lock():
+        upgrade_database(engine)
+        with SessionLocal() as db:
+            fts.ensure_table(db)
+            fts.rebuild_if_stale(db)   # databases from before the keyword index existed

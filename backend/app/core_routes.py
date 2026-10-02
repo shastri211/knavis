@@ -18,6 +18,8 @@ from .provider_service import ProviderService
 from .config import settings
 from .agents.semantic_router import SemanticRouter, utility_answer, CONVERSATION_RESPONSES
 from .guardrails import validate_message, validate_upload, GuardrailError
+from . import antivirus
+from .antivirus import ScanUnavailableError
 from .uploads import UploadTooLarge, clean_filename, inspect_upload, read_limited
 from .job_runner import run as run_job
 from .cleanup import delete_document as remove_document, delete_session as remove_session
@@ -159,6 +161,8 @@ async def upload(
         raw = await read_limited(file, settings.max_upload_mb * 1024 * 1024)
         validate_upload(name, len(raw))
         await asyncio.to_thread(inspect_upload, name, raw)   # real type, archive/PDF/image bombs: before anything is stored
+        await asyncio.to_thread(antivirus.check_upload, raw)  # optional ClamAV scan
+    except ScanUnavailableError as e: raise HTTPException(503, str(e))
     except UploadTooLarge as e: raise HTTPException(413, str(e))
     except GuardrailError as e: raise HTTPException(400, str(e))
 
@@ -198,7 +202,8 @@ async def upload(
               status="queued", progress=0, stage="queued", mode="auto", attempts=0)
     s.add(job); s.commit(); s.refresh(doc); s.refresh(job)
 
-    background_tasks.add_task(run_job, job.id)
+    if settings.ingestion_inline:
+        background_tasks.add_task(run_job, job.id)
     return {
         "document": DocumentOut.model_validate(doc),
         "job": {"id": job.id, "status": job.status, "progress": job.progress}
@@ -227,7 +232,8 @@ def process_document(doc_id: str, body: ProcessRequest, background_tasks: Backgr
     job = Job(session_id=doc.session_id, document_id=doc.id, type="ingestion", status="queued", progress=0, stage="queued", mode=mode, attempts=0)
     doc.status = "queued"
     s.add(job); s.commit(); s.refresh(job); s.refresh(doc)
-    background_tasks.add_task(run_job, job.id)
+    if settings.ingestion_inline:
+        background_tasks.add_task(run_job, job.id)
     return {"document": DocumentOut.model_validate(doc), "job": {"id": job.id, "status": job.status, "progress": job.progress}}
 
 

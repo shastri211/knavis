@@ -28,6 +28,8 @@ class Job(Base):
     stage: Mapped[str] = mapped_column(String(80), default='queued')
     mode: Mapped[str|None] = mapped_column(String(20), nullable=True)        # auto | confirmed | native_only
     attempts: Mapped[int|None] = mapped_column(Integer, nullable=True)       # times the job was started
+    locked_by: Mapped[str|None] = mapped_column(String(80), nullable=True)   # the worker running it (see app.job_runner)
+    locked_until: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)   # its lease; expires if the worker dies
     error: Mapped[str|None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

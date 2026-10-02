@@ -1,0 +1,81 @@
+# Optional overlay: several web processes plus dedicated ingestion workers sharing PostgreSQL, Redis and a Qdrant server.
+#   POSTGRES_PASSWORD=choose-one docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build \
+#       --scale backend=2 --scale worker=2
+#
+# What is shared and how:
+#   - application data: PostgreSQL (jobs are claimed with leases, so each runs once; a dead worker's jobs are taken over)
+#   - rate limits:      Redis (one count across all web processes)
+#   - vectors:          a Qdrant server (the on-disk Qdrant of the default setup belongs to one process)
+#   - uploads and spreadsheet tables: the knavis-data volume, mounted by every backend and worker. This works on ONE host.
+#     Spreading across hosts needs a shared filesystem or object storage, which this project does not provide.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: knavis
+      POSTGRES_DB: knavis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - knavis-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knavis -d knavis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    volumes:
+      - knavis-qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  backend:
+    environment: &shared
+      DATABASE_URL: postgresql://knavis:${POSTGRES_PASSWORD}@db:5432/knavis
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      INGESTION_INLINE: "false"          # web processes only enqueue; the workers do the processing
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-10}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *shared
+      DATA_DIR: /data
+    volumes:
+      - knavis-data:/data
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  knavis-db:
+  knavis-qdrant:
