@@ -79,6 +79,26 @@ system is 100% accurate on unseen questions.
 One abstention cost two calls: a "how many ..." question looked analytical, the SQL writer declined it, and retrieval
 then answered ("not found"). The latency is the hosted model's generation time, not local work.
 
+## Why the evidence gate was not changed (Phase 5 experiment)
+
+The two look-alike leaks (`abs_refund`, `abs_headcount`) looked like a gate-tuning problem. `eval/experiments/gate_variants.py`
+tries the obvious lexical fixes on the 24 answerable and 8 unanswerable keyword-reachable cases:
+
+| Variant | answerable kept | unanswerable blocked | what it broke |
+|---|---|---|---|
+| baseline (coverage >= 0.50) | 24 / 24 | 6 / 8 | |
+| also ignore "long, many, much, often, per" | 24 / 24 | 6 / 8 | nothing changed |
+| coverage >= 0.60 | 22 / 24 | 7 / 8 | `pr_support`, `hinglish_backup` |
+| inverse-document-frequency weighting, >= 0.45 | 22 / 24 | 6 / 8 | `pr_support`, `hinglish_backup` |
+| ignore words + idf, >= 0.50 | 21 / 24 | 7 / 8 | also `srt_growth` |
+
+Every setting that blocks "refund policy for enterprise customers" also blocks legitimate questions whose answer uses
+different words ("support hours" vs "9am to 6pm"), because both look the same lexically: one matching word, one absent
+word. "How many employees does Northwind Retail have?" cannot be separated at all: every one of its words occurs in the
+corpus. So the gate stays as it is, the leaks stay visible, and the model's instruction to abstain (which held 8 of 8 in
+the live run) is the backstop. A different signal, such as the dense similarity of the best chunk, is the next thing to
+try, and it needs the embedding provider to evaluate.
+
 What this does **not** prove: string matching cannot grade wording, the corpus is small and synthetic, scanned pages
 and audio are not covered (they need paid OCR/transcription), and conflicting-source handling is not scored. Treat the
 numbers as a regression gate and a way to compare changes, not as a certification.
