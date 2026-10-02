@@ -101,3 +101,77 @@ def test_no_chunk_exceeds_the_hard_maximum_even_with_the_section_line():
     els = [heading(0, long_title, 1)] + [para(i, "filler words go here. " * 55) for i in range(1, 8)]
     els.append(para(99, "z" * 1700))
     assert all(len(c.text) <= HARD_MAX for c in build_chunks(els))
+
+
+# ---- long text without punctuation ---------------------------------------------------------------
+
+def _reference_split_text(text, target=1200, overlap=150):
+    """The original algorithm (it re-sliced the remaining text for every piece, so it took quadratic time)."""
+    from app.ingest.chunker import _SENTENCE_RE
+    text = text.strip()
+    if len(text) <= target:
+        return [text] if text else []
+    sentences = []
+    for sentence in (s.strip() for s in _SENTENCE_RE.split(text)):
+        while len(sentence) > target:
+            cut = sentence.rfind(" ", 0, target)
+            cut = cut if cut > target // 2 else target
+            sentences.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if sentence:
+            sentences.append(sentence)
+    pieces, current = [], []
+    for sentence in sentences:
+        if current and sum(len(s) + 1 for s in current) + len(sentence) > target:
+            pieces.append(" ".join(current))
+            carried, size = [], 0
+            for previous in reversed(current):
+                if size + len(previous) > overlap:
+                    break
+                carried.insert(0, previous)
+                size += len(previous) + 1
+            current = carried
+        current.append(sentence)
+    if current:
+        pieces.append(" ".join(current))
+    return pieces
+
+
+def test_the_linear_splitter_gives_exactly_the_same_pieces_as_the_original():
+    import random
+    from app.ingest.chunker import split_text
+    rng = random.Random(3)
+    alphabet = ["a", "bb", "ccc", "word", "x" * 30, "y" * 700, " ", "  ", "\n", ". ", "! ", "\u0964", "\t"]
+    for _ in range(1500):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 400)))
+        target = rng.choice([50, 120, 1200])
+        assert split_text(text, target, 20) == _reference_split_text(text, target, 20), repr(text[:60])
+
+
+def test_splitting_scales_linearly_with_the_length_of_unbroken_text():
+    """A 40 MB paragraph with no sentence breaks used to take minutes. Doubling the input must roughly double the time."""
+    import time
+    from app.ingest.chunker import split_text
+    unit = "lorem ipsum dolor sit amet "
+
+    def best(chars):
+        text = (unit * (chars // len(unit) + 1))[:chars]
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            split_text(text)
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    small, large = best(6_000_000), best(12_000_000)
+    assert large < small * 3.2, (small, large)       # quadratic growth would give about 4x
+    assert large < 8                                  # and in absolute terms it is a fraction of a second, not minutes
+
+
+def test_a_very_long_unbroken_paragraph_is_chunked_within_the_size_limits():
+    from app.ingest.chunker import HARD_MAX, build_chunks
+    from app.ingest.elements import PARAGRAPH, Element
+    text = "lorem ipsum dolor sit amet " * 150_000
+    chunks = build_chunks([Element(id="p", kind=PARAGRAPH, text=text)])
+    assert len(chunks) > 3000 and max(len(c.text) for c in chunks) <= HARD_MAX
+    assert all(c.text.strip() for c in chunks)

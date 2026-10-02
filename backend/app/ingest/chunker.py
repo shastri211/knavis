@@ -74,13 +74,21 @@ def split_text(text: str, target: int = TARGET, overlap: int = OVERLAP) -> list[
         return [text] if text else []
     sentences = []
     for sentence in (s.strip() for s in _SENTENCE_RE.split(text)):
-        while len(sentence) > target:   # no punctuation: cut at a space
-            cut = sentence.rfind(" ", 0, target)
+        # No punctuation: cut at a space. Walk an index instead of re-slicing the remainder each time, which copied the
+        # rest of the text for every piece and made a long unbroken paragraph take quadratic time.
+        pos, end = 0, len(sentence)
+        while end - pos > target:
+            cut = sentence.rfind(" ", pos, pos + target) - pos
             cut = cut if cut > target // 2 else target
-            sentences.append(sentence[:cut].strip())
-            sentence = sentence[cut:].strip()
-        if sentence:
-            sentences.append(sentence)
+            piece = sentence[pos:pos + cut].strip()
+            if piece:
+                sentences.append(piece)
+            pos += cut
+            while pos < end and sentence[pos].isspace():
+                pos += 1
+        tail = sentence[pos:].strip()
+        if tail:
+            sentences.append(tail)
 
     pieces, current = [], []
     for sentence in sentences:
