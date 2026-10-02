@@ -1,6 +1,4 @@
 from app.grounding.evidence_gate import assess_evidence
-from app.retrieval.bm25 import BM25Index
-from types import SimpleNamespace
 from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.text import content_terms, is_overview_query, lexical_coverage, tokenize
 
@@ -9,14 +7,15 @@ QUESTION = "How long must company data be retained?"
 
 
 def _fused(texts):
-    chunks = [SimpleNamespace(id=f"d:{i}", text=t, metadata={"source": "p.txt"}) for i, t in enumerate(texts)]
-    index = BM25Index(); index.build(chunks)
-    return reciprocal_rank_fusion([[], index.search(QUESTION, 12)], limit=12)
+    """Keyword candidates the way the pipeline hands them over; a score of 0 must not matter to the gate."""
+    sparse = [{"id": f"d:{i}", "text": t, "metadata": {"source": "p.txt"}, "score": 0.0, "bm25_score": 0.0, "rank": i}
+              for i, t in enumerate(texts)]
+    return reciprocal_rank_fusion([[], sparse], limit=12)
 
 
-def test_single_chunk_corpus_is_sufficient_although_bm25_is_not_positive():
+def test_single_chunk_corpus_is_sufficient_whatever_its_keyword_score():
     candidates = _fused([DOC])
-    assert candidates[0]["bm25_score"] <= 0  # the failure mode this guards against
+    assert candidates[0]["bm25_score"] <= 0
     assert assess_evidence(QUESTION, candidates).sufficient
 
 

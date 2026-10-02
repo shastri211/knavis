@@ -26,7 +26,7 @@ class DownQdrant:
         self.calls += 1
         raise httpx.ConnectError("[WinError 10054] An existing connection was forcibly closed by the remote host")
 
-    collection_exists = ensure_collection = upsert = search = delete = _down
+    collection_exists = ensure_collection = upsert = search = delete = move_legacy_collection = _down
 
 
 @pytest.fixture

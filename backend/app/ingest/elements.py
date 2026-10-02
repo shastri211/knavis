@@ -55,6 +55,8 @@ class ExtractionResult:
     elements: list[Element] = field(default_factory=list)
     # What is known without any paid call: page counts, pages that need OCR, figure counts...
     info: dict[str, Any] = field(default_factory=dict)
+    # Spreadsheets only: the sheets as tables, read in the same pass for the analytics table store. Never cached.
+    tables: list = field(default_factory=list)
 
 
 def format_clock(seconds: float) -> str:

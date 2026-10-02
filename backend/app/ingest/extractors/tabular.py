@@ -7,6 +7,7 @@ to a model.
 import csv
 import datetime as dt
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..elements import PARAGRAPH, SUMMARY, TABLE, Element, ExtractionError, ExtractionResult
@@ -115,31 +116,28 @@ def sheet_elements(rows, *, sheet: str | None, prefix: str, truncated: bool = Fa
     return elements, {"rows": len(data), "columns": len(names), "truncated": truncated}
 
 
-def extract_xlsx(path: Path) -> ExtractionResult:
+def _read_xlsx(path: Path) -> list[tuple[str, list[list], bool]]:
+    """``(sheet name, raw rows, truncated)`` for every sheet of a workbook."""
     import openpyxl
     try:
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
         raise ExtractionError("This spreadsheet could not be opened; it may be corrupted or password protected.") from exc
-
-    elements, sheets = [], []
+    sheets = []
     try:
-        for index, ws in enumerate(workbook.worksheets):
+        for ws in workbook.worksheets:
             rows = []
             for count, row in enumerate(ws.iter_rows(values_only=True)):
                 if count > MAX_ROWS + 1:
                     break
                 rows.append([_cell(v) for v in row])
-            truncated = len(rows) > MAX_ROWS + 1
-            sheet_els, stats = sheet_elements(rows[:MAX_ROWS + 1], sheet=ws.title, prefix=f"sh{index}", truncated=truncated)
-            elements.extend(sheet_els)
-            sheets.append({"name": ws.title, **stats})
+            sheets.append((ws.title, rows[:MAX_ROWS + 1], len(rows) > MAX_ROWS + 1))
     finally:
         workbook.close()
-    return ExtractionResult("xlsx", elements, {"sheets": sheets})
+    return sheets
 
 
-def extract_csv(path: Path) -> ExtractionResult:
+def _read_csv(path: Path) -> tuple[list[list], bool]:
     text = decode_bytes(path.read_bytes())
     if path.suffix.lower() == ".tsv":
         dialect = csv.excel_tab
@@ -154,6 +152,57 @@ def extract_csv(path: Path) -> ExtractionResult:
         if count > MAX_ROWS + 1:
             break
         rows.append(row)
-    truncated = len(rows) > MAX_ROWS + 1
-    elements, stats = sheet_elements(rows[:MAX_ROWS + 1], sheet=None, prefix="t", truncated=truncated)
-    return ExtractionResult("csv", elements, {"sheets": [{"name": path.stem, **stats}]})
+    return rows[:MAX_ROWS + 1], len(rows) > MAX_ROWS + 1
+
+
+def extract_xlsx(path: Path) -> ExtractionResult:
+    elements, sheets, tables = [], [], []
+    for index, (title, rows, truncated) in enumerate(_read_xlsx(path)):
+        sheet_els, stats = sheet_elements(rows, sheet=title, prefix=f"sh{index}", truncated=truncated)
+        elements.extend(sheet_els)
+        sheets.append({"name": title, **stats})
+        if table := _sheet_table(rows, title, truncated):
+            tables.append(table)
+    return ExtractionResult("xlsx", elements, {"sheets": sheets}, tables)
+
+
+def extract_csv(path: Path) -> ExtractionResult:
+    rows, truncated = _read_csv(path)
+    elements, stats = sheet_elements(rows, sheet=None, prefix="t", truncated=truncated)
+    table = _sheet_table(rows, None, truncated)
+    return ExtractionResult("csv", elements, {"sheets": [{"name": path.stem, **stats}]}, [table] if table else [])
+
+
+# ---- whole sheets as data (the analytics table store) -----------------------------------------
+
+@dataclass
+class SheetTable:
+    """One sheet's data rows exactly as the extractor sees them, with each row's real sheet number."""
+    sheet: str | None
+    header: list[str]
+    rows: list[list[str]]       # data rows, as text, as wide as the header
+    numbers: list[int]          # the sheet row number of each data row
+    truncated: bool = False
+
+
+def _sheet_table(rows, sheet: str | None, truncated: bool) -> SheetTable | None:
+    rows, numbers = clean_rows_numbered(rows)
+    if not rows:
+        return None
+    start = _header_index(rows)
+    rows, numbers = rows[start:], numbers[start:]
+    header = [h or f"column {i}" for i, h in enumerate(rows[0], 1)]
+    if len(rows) < 2:
+        return None   # a header with no data is not a table
+    return SheetTable(sheet, header, rows[1:], numbers[1:], truncated)
+
+
+def read_tables(path: Path) -> list[SheetTable]:
+    """Every sheet of an .xlsx/.xlsm workbook or a delimited text file as a table. Local and free."""
+    path = Path(path)
+    if path.suffix.lower() in (".xlsx", ".xlsm"):
+        tables = [_sheet_table(rows, title, truncated) for title, rows, truncated in _read_xlsx(path)]
+    else:
+        rows, truncated = _read_csv(path)
+        tables = [_sheet_table(rows, None, truncated)]
+    return [t for t in tables if t]

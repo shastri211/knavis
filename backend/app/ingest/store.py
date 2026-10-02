@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ..models import DocChunk, Document, EmbeddingCache, Evidence, ExtractionCache
+from ..retrieval import fts
 from .chunker import ChunkData, build_chunks
 from .elements import OCR_TEXT, PARAGRAPH, RECORD, TABLE, TRANSCRIPT, Element
 from .extract import EXTRACTOR_VERSION
@@ -80,7 +81,7 @@ def elements_from_evidence(rows: list[Evidence]) -> list[Element]:
 # ---- chunks ------------------------------------------------------------------------------
 
 def save_chunks(db: Session, document: Document, chunks: list[ChunkData]) -> list[DocChunk]:
-    """Replace the document's chunks."""
+    """Replace the document's chunks (and their keyword-index entries)."""
     db.query(DocChunk).filter(DocChunk.document_id == document.id).delete()
     rows = []
     for c in chunks:
@@ -94,6 +95,7 @@ def save_chunks(db: Session, document: Document, chunks: list[ChunkData]) -> lis
         db.add(row)
         rows.append(row)
     db.flush()
+    fts.replace_document(db, document.id, rows)   # the keyword index changes in the same transaction as the chunks
     return rows
 
 

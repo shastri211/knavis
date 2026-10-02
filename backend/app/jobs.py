@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import SessionLocal
 from .models import DocChunk, Document, Job
+from .analytics.loader import TABULAR_KINDS, load_document_tables
 from .guardrails import sanitize_error
 from .ingest.chunker import build_chunks
 from .ingest.elements import Element, ExtractionError
@@ -92,6 +93,7 @@ async def run_ingestion(job_id: str, mode: str = "auto"):
         cached = get_cached_extraction(db, content_hash)
         if cached and cached[0] in _FIGURE_KINDS and not cached[2].get("vision_done") and get_vision_provider():
             cached = None   # figures were never described and a vision provider is configured now
+        sheets = None   # spreadsheet data read by the extractor, so the table store need not read the file again
         if cached:
             kind, elements, info = cached
             status, from_cache = "complete", True
@@ -100,6 +102,7 @@ async def run_ingestion(job_id: str, mode: str = "auto"):
         else:
             result = await asyncio.to_thread(extract_document, path, settings.data_dir / "converted" / doc.id)
             kind, native, info, from_cache = result.kind, result.elements, dict(result.info), False
+            sheets = result.tables
             job.progress, job.stage = 35, "storing_evidence"
             db.commit()
             if native:   # stage A: the native text is searchable before any hosted call is made
@@ -133,6 +136,11 @@ async def run_ingestion(job_id: str, mode: str = "auto"):
                 put_cached_extraction(db, content_hash, kind, elements, info)
             db.commit()
 
+        tables = []
+        if kind in TABULAR_KINDS and settings.analytics_enabled:   # spreadsheets also become queryable tables, for questions that need computing
+            tables = await asyncio.to_thread(load_document_tables, db, doc, path, settings.data_dir / "converted" / doc.id, sheets)
+            db.commit()
+
         job.progress, job.stage = 75, "indexing"
         db.commit()
         stored, rows, dense = await _persist(db, doc, elements)
@@ -142,6 +150,7 @@ async def run_ingestion(job_id: str, mode: str = "auto"):
             **meta, "detected_type": kind, "content_hash": content_hash, "elements": stored, "chunks": len(rows),
             "specialist_status": status, "from_cache": from_cache, "info": info, "embedding": dense,
             "logical_documents": info.get("logical_documents"),
+            "tables": [{"name": t.table_name, "sheet": t.sheet, "rows": t.row_count, "columns": len(t.columns_json)} for t in tables],
         }
         job.status, job.progress, job.stage = "completed", 100, doc.status
         db.commit()

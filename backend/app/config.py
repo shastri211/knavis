@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # evidence_min_dense OR it covers at least evidence_min_coverage of the question's
     # content terms. At most evidence_max_items chunks are sent to the LLM.
     evidence_min_dense:float=0.35; evidence_min_coverage:float=0.5; evidence_max_items:int=8
+    # Spreadsheet analytics: questions that need computing (totals, counts, the highest group) are answered with
+    # a read-only SQL query over the sheet, written by one model call and strictly validated before it runs.
+    analytics_enabled:bool=True
+    analytics_timeout_seconds:float=5.0     # a query running longer is cancelled
+    analytics_max_rows:int=200              # rows a query may return
     # Hosted specialists (OCR, figure description, speech-to-text). Every *_provider setting is
     # "auto" (first configured provider in the documented order), a provider name, or "none".
     mistral_api_key:str=''; gemini_api_key:str=''

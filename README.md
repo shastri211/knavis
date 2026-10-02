@@ -13,7 +13,7 @@ abstains when its session documents do not provide sufficient evidence.
    `python -m pip install -r backend/requirements.txt`
 3. Copy `.env.example` to `.env`, then configure at least one chat provider.
    Add `NVIDIA_API_KEY` as well to enable dense embeddings; without it the app
-   retains lexical BM25 retrieval over persisted evidence.
+   keeps answering from persistent keyword search (SQLite FTS5).
 4. Check configuration without exposing secrets:
    `python scripts/check_config.py`
 5. Start the backend: `scripts/start_backend.ps1`
@@ -80,9 +80,60 @@ Not yet supported: handwriting quality tuning, e-mail attachments, video frames.
 `GET /api/sessions/{id}/documents` returns each document's `details` (pages, estimated OCR
 calls, chunk count, whether it came from the cache).
 
-Sessions and messages persist in local SQLite. Qdrant local storage is used
-only when NVIDIA embeddings are configured; set `QDRANT_URL` and
+Sessions and messages persist in local SQLite (answers keep their citations when a chat is reopened).
+Qdrant local storage is used only when NVIDIA embeddings are configured; set `QDRANT_URL` and
 `QDRANT_API_KEY` for Qdrant Cloud. Documents remain session-scoped.
+
+## Retrieval and storage
+
+- **Keyword search is persistent.** Chunks are indexed in a SQLite FTS5 table (`chunks_fts`) that is written in
+  the same transaction as the chunks, so it follows ingestion, re-chunking and deletion. Nothing is rebuilt per
+  question. Text is reduced to the same stemmed terms the evidence gate uses, so Hindi words stay whole and
+  "retained" finds "retain". Databases from before the index existed are re-indexed once at startup.
+- **One vector collection.** Every session shares the Qdrant collection `knavis_chunks`
+  (`QDRANT_COLLECTION` to rename it); each point carries `session_id` and `document_id` and every search is
+  filtered by session, with a payload index on both on a Qdrant server. A session that still has its own
+  `session_<id>` collection is moved into the shared one the first time it is used (same point ids, so an
+  interrupted move is simply repeated), then the old collection is dropped.
+- **Deleting is complete.** `DELETE /api/sessions/{id}` removes messages, documents, chunks, keyword-index rows,
+  spreadsheet tables, vectors and the uploaded files; `DELETE /api/documents/{id}` does the same for one
+  document. A vector store that is down never blocks the delete (the rows go; the failure is logged).
+- **Schema changes are additive.** Startup adds any new nullable model column to an existing database
+  (`app/migrations.py`), which is how `messages.citations` appeared without a migration tool.
+
+## One model call per question
+
+Rules, not a model, route a turn: greetings, thanks, "what can you do", the date, time and day, and prompt
+injection are handled for free. Once a session has documents, every other message is a grounded document
+question (the evidence gate abstains when the documents do not cover it; it is never answered from general
+knowledge), so a normal question costs exactly one model call: the answer. Only a session with no documents
+still asks the model to tell chat from a question about files that were never uploaded.
+
+## Spreadsheet analytics
+
+Retrieval cannot compute, so "which channel had the highest number of conversions" or "total sales by region"
+used to abstain. Spreadsheets and CSV files are now also loaded, at ingestion, as real tables in a per-session
+SQLite file (`<data dir>/tables/<session>.sqlite`; no new dependency), with each sheet's real row numbers.
+
+An analytical question is recognised by rules (a total, average, count, "how many", highest/lowest, "by" or
+"per" a column, a numeric filter) *and* a match with a column, a value of a column or the table; with only
+spreadsheets in the session, a computing word alone is enough. Then:
+
+1. **One model call** writes a single SQLite `SELECT` from the table schemas (column names, types, the values of
+   low-cardinality columns, ranges, 0/1 flags, an example row).
+2. **The query is validated strictly:** one statement, `SELECT`/`WITH` only, no comments, and SQLite's own
+   authorizer allows reads of the session's own tables and columns and a short list of functions only (no
+   `PRAGMA`, `ATTACH`, writes, recursive queries or extensions, however they are spelt). It runs on a
+   read-only connection with a time limit and a row cap, and an unknown `"name"` is an error, not a string.
+3. **The answer is rendered from the rows**, not written by the model: a lead sentence, the result table, and a
+   source line naming the file, the sheet, the rows and the columns the query actually read. The one label the
+   model contributes is dropped if it states a number the result does not contain.
+
+If the query cannot be validated or run, the answer is a safe "I couldn't compute that reliably" abstention.
+If the model decides the question is not about the tables and the session also has other documents, retrieval
+answers it instead. Spreadsheet text stays searchable for lookups.
+
+Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS` (see `.env.example`).
 
 ## Validation
 

@@ -7,7 +7,7 @@ def now(): return datetime.now(timezone.utc)
 class ChatSession(Base):
  __tablename__='sessions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); title:Mapped[str]=mapped_column(String(200),default='New chat'); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now); messages=relationship('Message',cascade='all,delete-orphan',back_populates='session'); documents=relationship('Document',cascade='all,delete-orphan',back_populates='session')
 class Message(Base):
- __tablename__='messages'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); session_id:Mapped[str]=mapped_column(ForeignKey('sessions.id'),index=True); role:Mapped[str]=mapped_column(String(20)); content:Mapped[str]=mapped_column(Text); language:Mapped[str|None]=mapped_column(String(50),nullable=True); intent:Mapped[str|None]=mapped_column(String(60),nullable=True); provider:Mapped[str|None]=mapped_column(String(40),nullable=True); model:Mapped[str|None]=mapped_column(String(200),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); session=relationship('ChatSession',back_populates='messages')
+ __tablename__='messages'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); session_id:Mapped[str]=mapped_column(ForeignKey('sessions.id'),index=True); role:Mapped[str]=mapped_column(String(20)); content:Mapped[str]=mapped_column(Text); language:Mapped[str|None]=mapped_column(String(50),nullable=True); intent:Mapped[str|None]=mapped_column(String(60),nullable=True); provider:Mapped[str|None]=mapped_column(String(40),nullable=True); model:Mapped[str|None]=mapped_column(String(200),nullable=True); citations:Mapped[list|None]=mapped_column(JSON,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); session=relationship('ChatSession',back_populates='messages')
 class Document(Base):
  __tablename__='documents'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); session_id:Mapped[str]=mapped_column(ForeignKey('sessions.id'),index=True); filename:Mapped[str]=mapped_column(String(255)); content_type:Mapped[str]=mapped_column(String(120)); path:Mapped[str]=mapped_column(Text); status:Mapped[str]=mapped_column(String(40),default='uploaded'); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); metadata_json:Mapped[dict|None]=mapped_column(JSON,nullable=True); session=relationship('ChatSession',back_populates='documents'); evidence=relationship('Evidence',cascade='all,delete-orphan',back_populates='document'); chunks=relationship('DocChunk',cascade='all,delete-orphan',back_populates='document')
  'Extraction details shown to clients (page counts, OCR estimate, cache reuse, ...).'
@@ -94,4 +94,22 @@ class SpecialistCache(Base):
     id: Mapped[str] = mapped_column(String(200), primary_key=True)   # "ocr:<file sha>:<page>", "fig:<image sha>", "asr:<file sha>"
     provider: Mapped[str] = mapped_column(String(60))
     payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class DataTable(Base):
+    """One spreadsheet sheet / CSV loaded as a queryable table (see app.analytics.tablestore)."""
+    __tablename__ = 'data_tables'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    document_id: Mapped[str] = mapped_column(String(36), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    sheet: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    table_name: Mapped[str] = mapped_column(String(120))              # the SQL name inside the session's table file
+    columns_json: Mapped[list] = mapped_column(JSON)                   # [{name, original, type, values?, min?, max?}]
+    sample_json: Mapped[list | None] = mapped_column(JSON, nullable=True)   # the first few rows, as text
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_row: Mapped[int | None] = mapped_column(Integer, nullable=True)   # real sheet row numbers of the data
+    last_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    truncated: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
