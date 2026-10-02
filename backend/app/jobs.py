@@ -15,16 +15,24 @@ from .multimodal.ocr import NVIDIAOCRClient
 from .multimodal.page_render import render_pdf_pages
 
 
+IMAGE_MIME_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".bmp": "image/bmp", ".gif": "image/gif",
+}
+
+
 async def _ocr_nodes(path: Path, document_id: str, source_name: str, pages: set[int] | None = None):
     if not settings.nvidia_api_key:
         return [], "ocr_unavailable"
     client = NVIDIAOCRClient(settings.nvidia_api_key, settings.nvidia_ocr_base_url)
-    rendered = render_pdf_pages(path, settings.data_dir / "renders" / document_id) if path.suffix.lower() == ".pdf" else [(None, path)]
+    if path.suffix.lower() == ".pdf":
+        rendered = render_pdf_pages(path, settings.data_dir / "renders" / document_id, pages=pages)
+    else:
+        rendered = [(None, path)]
     nodes = []
     for page, image_path in rendered:
-        if pages is not None and page not in pages:
-            continue
-        mime_type = "image/png" if page else f"image/{image_path.suffix.lower().lstrip('.')}"
+        # Rendered PDF pages are always PNG; standalone images need their real MIME type.
+        mime_type = "image/png" if page else IMAGE_MIME_TYPES.get(image_path.suffix.lower(), "application/octet-stream")
         detections = await client.image_bytes(image_path.read_bytes(), mime_type, page)
         for evidence in ocr_to_evidence(document_id, detections):
             nodes.append(EvidenceNode(

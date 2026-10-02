@@ -7,7 +7,7 @@ class FakeGuardrails:
         return AgentDecision(True, "greeting", "conversation", intent="GREETING")
 
 class FakeGreeting:
-    async def handle(self, request):
+    async def handle(self, request, decision=None):
         return AgentResponse("hello", "greeting")
 
 class FakeRAG:

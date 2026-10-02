@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal
 from .models import ChatSession, Message, Document, Job, UsageEvent
 from .schemas import *
-from .providers import models
+from .providers import models, resolve_selection, ProviderError
 from .policy import SYSTEM_POLICY
 from .provider_service import ProviderService
 from .config import settings
@@ -73,8 +73,8 @@ async def chat_route(p: MessageCreate, s: Session = Depends(db)):
     try: validate_message(p.content)
     except GuardrailError as e: raise HTTPException(400, str(e))
 
-    provider = p.provider or "nvidia"
-    model = p.model or settings.default_model
+    try: provider, model = resolve_selection(p.provider, p.model)
+    except ProviderError as e: raise HTTPException(400, str(e))
     user_msg = Message(session_id=session.id, role="user", content=p.content,
                        provider=provider, model=model)
     s.add(user_msg); s.flush()
@@ -132,7 +132,7 @@ async def upload(
     except GuardrailError as e: raise HTTPException(400, str(e))
 
     name = Path(file.filename or "upload.bin").name
-    target = Path("data/uploads") / (str(uuid4()) + "_" + name)
+    target = settings.upload_dir / (str(uuid4()) + "_" + name)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(raw)
 

@@ -30,7 +30,13 @@ class AgentGraphNodes:
         }
 
     async def greeting_node(self, state: AgentState):
-        response = await self.greeting.handle(request_from_state(state))
+        # Reuse the guardrail's classification; re-classifying would spend another LLM call.
+        from ..agents.semantic_router import RouteDecision
+        decision = RouteDecision(
+            state.get("intent") or "NORMAL_CONVERSATION", "conversation",
+            state.get("language") or "unknown", 1.0, "classified by guardrails",
+        )
+        response = await self.greeting.handle(request_from_state(state), decision)
         return {
             "answer": response.text,
             "route": "greeting",

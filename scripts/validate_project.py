@@ -17,10 +17,8 @@ def main():
 
     checks = [
         [sys.executable, "-m", "compileall", "-q", "app"],
-        [sys.executable, "-m", "pytest", "-q", "tests/test_final_contract.py"],
-        [sys.executable, "-m", "pytest", "-q", "tests/test_reliability.py"],
-        [sys.executable, "-m", "pytest", "-q", "tests/test_agentic.py"],
-        [sys.executable, "-m", "pytest", "-q", "tests/test_safety_contracts.py"],
+        # The whole suite, including the end-to-end golden tests per file type.
+        [sys.executable, "-m", "pytest", "-q", "tests"],
     ]
 
     failures = []

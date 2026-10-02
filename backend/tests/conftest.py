@@ -1,0 +1,151 @@
+"""Test isolation.
+
+The app reads settings from the project's real .env at import time. These variables are set
+BEFORE any ``app`` import so tests never touch real API keys, the real database, or the
+network, and never write into the project's data directory.
+"""
+import io
+import json
+import os
+import tempfile
+
+import pytest
+
+os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="mrag_tests_")
+for _key in ("NVIDIA_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "ASSEMBLYAI_API_KEY",
+             "QDRANT_URL", "QDRANT_API_KEY", "OPENROUTER_MODEL"):
+    os.environ[_key] = ""
+os.environ["DEFAULT_PROVIDER"] = "nvidia"
+os.environ["DEFAULT_MODEL"] = "meta/llama-3.1-8b-instruct"
+
+MODEL = "meta/llama-3.1-8b-instruct"
+FACT = "Company data must be retained for 90 days after the contract ends."
+OTHER_FACTS = "Backups are kept for 30 days. Audit logs are retained for 365 days. Deletion requests are answered within 14 days."
+
+
+class FakeLLM:
+    """Stands in for the provider and records every call by kind (router/answer/conversation)."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.answer = f"{FACT} [EVIDENCE 1]"
+        self.router = {"intent": "RAG_QUERY", "route": "rag"}
+        self.answer_prompt = ""
+
+    async def chat(self, provider, model, messages, **kwargs):
+        from app.providers import Response
+        system = messages[0]["content"]
+        if "semantic router" in system:
+            self.calls.append("router")
+            text = json.dumps({**self.router, "language": "English", "confidence": 0.9, "reason": "test"})
+        elif "answer-generation component" in system:
+            self.calls.append("answer")
+            self.answer_prompt = messages[-1]["content"]
+            text = self.answer
+        else:
+            self.calls.append("conversation")
+            text = "Sure, happy to chat."
+        return Response(text, provider, model, {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+
+
+@pytest.fixture
+def llm(monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr("app.provider_service.raw_chat", fake.chat)
+    return fake
+
+
+@pytest.fixture(scope="session")
+def client():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def session_id(client):
+    return client.post("/api/sessions", json={"title": "test"}).json()["id"]
+
+
+# ---- sample documents -------------------------------------------------------------------
+
+def make_txt(text=None):
+    return (text or f"Retention Policy\n\n{FACT} {OTHER_FACTS}").encode()
+
+def make_csv():
+    return f"rule,detail\nretention,{FACT}\nbackups,Backups are kept for 30 days.\n".encode()
+
+def make_json():
+    return json.dumps({"policy": {"retention": FACT, "backups": "Backups are kept for 30 days."}}).encode()
+
+def make_docx():
+    from docx import Document
+    doc = Document()
+    doc.add_paragraph("Retention Policy")
+    doc.add_paragraph(FACT)
+    doc.add_paragraph(OTHER_FACTS)
+    buf = io.BytesIO(); doc.save(buf)
+    return buf.getvalue()
+
+def make_pptx():
+    from pptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide.shapes.title.text = "Retention Policy"
+    slide.placeholders[1].text = FACT
+    buf = io.BytesIO(); prs.save(buf)
+    return buf.getvalue()
+
+def make_xlsx():
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Policy"
+    ws.append(["Rule", "Detail"])
+    ws.append(["Retention", FACT])
+    ws.append(["Backups", "Backups are kept for 30 days."])
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+def make_pdf():
+    import fitz
+    pdf = fitz.open()
+    page = pdf.new_page()
+    page.insert_textbox(fitz.Rect(72, 72, 520, 300), f"Retention Policy\n\n{FACT} {OTHER_FACTS}", fontsize=11)
+    data = pdf.tobytes()
+    pdf.close()
+    return data
+
+SAMPLES = {
+    "txt": ("policy.txt", make_txt, "text/plain"),
+    "md": ("policy.md", make_txt, "text/markdown"),
+    "csv": ("policy.csv", make_csv, "text/csv"),
+    "json": ("policy.json", make_json, "application/json"),
+    "docx": ("policy.docx", make_docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "pptx": ("policy.pptx", make_pptx, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    "xlsx": ("policy.xlsx", make_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "pdf": ("policy.pdf", make_pdf, "application/pdf"),
+}
+
+
+@pytest.fixture
+def upload(client):
+    """Upload bytes to a session and return (document, job). Background ingestion has finished on return."""
+    def _upload(session_id, name, data, content_type="application/octet-stream"):
+        response = client.post("/api/uploads", data={"session_id": session_id}, files={"file": (name, data, content_type)})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        job = client.get(f"/api/jobs/{body['job']['id']}").json()
+        document = next(d for d in client.get(f"/api/sessions/{session_id}/documents").json() if d["id"] == body["document"]["id"])
+        return document, job
+    return _upload
+
+
+@pytest.fixture
+def ask(client):
+    def _ask(session_id, question, **extra):
+        response = client.post("/api/chat", json={"session_id": session_id, "content": question, "provider": "nvidia", "model": MODEL, **extra})
+        assert response.status_code == 200, response.text
+        return response.json()
+    return _ask

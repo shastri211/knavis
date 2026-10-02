@@ -3,6 +3,8 @@ from .decomposer import decompose_query
 from .query_rewrite import rewrite_query
 from .verification import verify_answer
 
+ABSTENTION = "I don't have enough reliable evidence in the provided material to answer that accurately, so I won't guess."
+
 class AgentRunner:
     """
     Bounded agent loop.
@@ -42,7 +44,7 @@ class AgentRunner:
 
         if not evidence:
             return {
-                "answer": "I don't have enough reliable evidence in the provided material to answer that accurately, so I won't guess.",
+                "answer": ABSTENTION,
                 "citations": [],
                 "grounded": False,
                 "agent": {"retrieval_calls": calls, "status": "abstained"},
@@ -51,11 +53,14 @@ class AgentRunner:
         result = await self.answer_service.answer(
             query, evidence, provider, model, language
         )
+        # The model cited the gate-selected evidence, so verify against that exact list.
+        cited_evidence = result.pop("evidence", evidence)
+        usage = result.get("usage")
 
         if not result.get("grounded"):
-            return {**result, "agent": {"retrieval_calls": calls, "status": "abstained"}}
+            return {**result, "agent": {"retrieval_calls": calls, "status": "abstained", "usage": usage}}
 
-        verification = verify_answer(result["answer"], evidence)
+        verification = verify_answer(result["answer"], cited_evidence)
         if not verification.supported:
             return {
                 "answer": "I found retrieved material, but I could not verify the generated answer against it reliably, so I won't guess.",
@@ -66,6 +71,7 @@ class AgentRunner:
                     "status": "verification_failed",
                     "unsupported_claims": verification.unsupported_claims,
                     "conflicts": verification.conflicts,
+                    "usage": usage,
                 },
             }
 
@@ -75,5 +81,7 @@ class AgentRunner:
                 "retrieval_calls": calls,
                 "status": "verified",
                 "claims": len(verification.claims),
+                "conflicts": verification.conflicts,
+                "usage": usage,
             },
         }

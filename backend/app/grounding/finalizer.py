@@ -13,7 +13,6 @@ def finalize_answer(answer: str, evidence: list[dict], require_citations=True):
     if require_citations and not ok:
         return ABSTENTION, [], False
 
-    citations = source_citations(
-        [evidence[i - 1] for i in refs] if refs else evidence
-    )
+    unique_refs = list(dict.fromkeys(refs))
+    citations = source_citations(evidence, unique_refs or None)
     return answer.strip(), citations, True

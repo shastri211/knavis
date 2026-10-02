@@ -7,6 +7,7 @@ from ..retrieval.bm25 import BM25Index
 from ..retrieval.embeddings import NVIDIAEmbeddingClient
 from ..retrieval.qdrant_store import QdrantStore
 from ..retrieval.rrf import reciprocal_rank_fusion
+from ..retrieval.text import is_overview_query
 from ..grounding.answer_service import GroundedAnswerService
 from ..provider_service import ProviderService
 from ..db import SessionLocal
@@ -202,6 +203,7 @@ class IntegratedRAGPipeline:
                 "text": h["payload"].get("text", ""),
                 "metadata": h["payload"],
                 "score": h["score"],
+                "dense_score": h["score"],
             }
             for h in hits
         ]
@@ -238,6 +240,9 @@ class IntegratedRAGPipeline:
             )
 
             docs = []
+            # Reading order of every chunk (document upload time, page, position),
+            # used to sample whole-document overview requests.
+            order = {}
 
             for evidence, document in rows:
                 if not evidence.text.strip():
@@ -250,11 +255,15 @@ class IntegratedRAGPipeline:
                     **(evidence.metadata_json or {}),
                 }
 
-                for chunk in chunk_text(
+                for position, chunk in enumerate(chunk_text(
                     evidence.id,
                     evidence.text,
                     metadata=metadata,
-                ):
+                )):
+                    order[chunk.id] = (
+                        str(document.created_at), document.id,
+                        evidence.page or 0, evidence.id, position,
+                    )
                     docs.append(
                         type(
                             "C",
@@ -272,6 +281,11 @@ class IntegratedRAGPipeline:
 
         finally:
             db.close()
+
+        # "Summarize this document" has no content terms to match, so similarity search
+        # would return noise. Sample the documents themselves, in reading order.
+        if is_overview_query(query):
+            return self._overview_sample(docs, order, k)
 
         # Build lexical retrieval from durable SQLite evidence.
         self.bm25.build(docs)
@@ -301,6 +315,32 @@ class IntegratedRAGPipeline:
             [dense, sparse],
             limit=k,
         )
+
+    @staticmethod
+    def _overview_sample(docs, order, k):
+        """Evenly spaced chunks from each document, in reading order, up to ``k`` total."""
+        by_document = {}
+        for chunk in sorted(docs, key=lambda c: order[c.id]):
+            by_document.setdefault(chunk.metadata.get("document_id"), []).append(chunk)
+        if not by_document:
+            return []
+
+        budget = max(1, k // len(by_document))
+        picked = []
+        for chunks in by_document.values():
+            if len(chunks) <= budget:
+                indexes = range(len(chunks))
+            elif budget == 1:
+                indexes = [0]
+            else:
+                indexes = sorted({round(i * (len(chunks) - 1) / (budget - 1)) for i in range(budget)})
+            picked.extend(chunks[i] for i in indexes)
+
+        return [
+            {"id": c.id, "text": c.text, "metadata": c.metadata,
+             "overview": True, "rrf_score": 1.0 / (rank + 1)}
+            for rank, c in enumerate(picked[:k])
+        ]
 
     async def answer(
         self,

@@ -47,7 +47,13 @@ class SupervisorAgent:
             )
 
         if guard.route == "greeting":
-            return await self.greeting.handle(request)
+            # Reuse the guardrail's classification instead of classifying (an LLM call) again.
+            from .semantic_router import RouteDecision
+            decision = RouteDecision(
+                guard.intent or "NORMAL_CONVERSATION", "conversation",
+                guard.language or "unknown", 1.0, "classified by guardrails",
+            )
+            return await self.greeting.handle(request, decision)
 
         if guard.route == "rag":
             return await self.rag.handle(request)

@@ -54,4 +54,6 @@ class GroundedAnswerService:
             "grounded": grounded,
             "reason": "verified" if grounded else "citation/evidence validation failed",
             "usage": response.usage,
+            # [EVIDENCE N] numbers index into this list, so verification must use it.
+            "evidence": decision.selected,
         }

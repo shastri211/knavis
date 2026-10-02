@@ -1,7 +1,10 @@
+import logging
 import httpx
 from dataclasses import dataclass
 
 from .config import settings
+
+logger = logging.getLogger("mragrag")
 
 
 @dataclass
@@ -40,6 +43,36 @@ def models():
 def validate(provider, model):
     if not any(item["provider"] == provider and item["id"] == model and item["selectable"] for item in models()):
         raise ProviderError("Model is not in the approved catalog")
+
+
+def resolve_selection(provider=None, model=None):
+    """Return a catalog-valid ``(provider, model)``.
+
+    An explicit but invalid choice raises ``ProviderError`` so callers can reject it.
+    Missing parts fall back to the configured defaults; if those defaults are not in the
+    catalog (e.g. a stale DEFAULT_MODEL in .env) the first catalog entry is used instead
+    of failing every request that omits a model.
+    """
+    available = models()
+    if provider and model:
+        validate(provider, model)
+        return provider, model
+    if provider:
+        for item in available:
+            if item["provider"] == provider:
+                return provider, item["id"]
+        raise ProviderError(f"Unknown provider: {provider}")
+    if model:
+        for item in available:
+            if item["id"] == model:
+                return item["provider"], model
+        raise ProviderError("Model is not in the approved catalog")
+    for item in available:
+        if item["provider"] == settings.default_provider and item["id"] == settings.default_model:
+            return item["provider"], item["id"]
+    logger.warning("Configured default %s/%s is not in the model catalog; using %s/%s",
+                   settings.default_provider, settings.default_model, available[0]["provider"], available[0]["id"])
+    return available[0]["provider"], available[0]["id"]
 
 
 async def chat(provider, model, messages, **kwargs):
