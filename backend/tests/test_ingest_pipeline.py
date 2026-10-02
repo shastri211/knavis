@@ -85,17 +85,17 @@ def test_a_file_seen_before_is_not_extracted_again_in_another_session(client, ll
 
 # ---- OCR: only scanned pages, unique ids, cached ----------------------------------------
 
-class FakeOCR:
-    calls = []
+class FakeOCRProvider:
+    """Stands in for a hosted OCR provider and records every request it receives."""
+    name = "fake"
+    requests: list[list[int]] = []
+    texts = {2: "# Scanned policy\n\nCompany data must be retained for 90 days.", 3: "Second scanned page."}
 
-    def __init__(self, *args, **kwargs):
-        pass
-
-    async def image_bytes(self, image, mime_type="image/png", page=None):
-        from app.multimodal.ocr import OCRDetection
-        FakeOCR.calls.append(page)
-        words = {2: ["Scanned", "policy", "text:", "company", "data", "retained", "for", "90", "days"], 3: ["Second", "scanned", "page"]}[page]
-        return [OCRDetection(w, 0.99, [{"x": i, "y": 0}], page) for i, w in enumerate(words)]
+    async def recognize(self, path, pages=None):
+        from app.specialists.base import OCRPage
+        FakeOCRProvider.requests.append(list(pages or []))
+        for page in pages:
+            yield OCRPage(page=page, text=self.texts[page], provider=self.name)
 
 
 def make_scanned_pdf():
@@ -112,46 +112,41 @@ def make_scanned_pdf():
 
 
 def test_only_scanned_pages_are_ocrd_each_page_is_kept_and_the_result_is_cached(client, llm, upload, ask, monkeypatch):
-    import app.jobs as jobs
-    from app.config import settings
-    FakeOCR.calls = []
-    monkeypatch.setattr(jobs, "NVIDIAOCRClient", FakeOCR)
-    monkeypatch.setattr(settings, "nvidia_api_key", "test-key")
+    import app.specialists.run as run
+    FakeOCRProvider.requests = []
+    monkeypatch.setattr(run, "get_ocr_provider", lambda: FakeOCRProvider())
 
     data = make_scanned_pdf()
     first_session, second_session = new_session(client), new_session(client)
     document, job = upload(first_session, "scan.pdf", data, "application/pdf")
 
-    assert FakeOCR.calls == [2, 3]                                     # page 1 has native text: no OCR call
+    assert FakeOCRProvider.requests == [[2, 3]]                        # page 1 has native text: never sent
     assert job["status"] == "completed" and document["status"] == "indexed"
-    assert document["details"]["info"]["estimated_ocr_calls"] == 2
-    text = "\n".join(c[5] for c in chunks_of(document["id"]))
-    assert "Scanned policy text: company data retained for 90 days" in text   # words flow as one line
-    assert "Second scanned page" in text                                # page 3 did not overwrite page 2
-    pages = {c[2] for c in chunks_of(document["id"])}
-    assert pages == {1, 2, 3}
-    ocr_chunks = [c for c in chunks_of(document["id"]) if c[1] == "ocr_text"]
-    assert len(ocr_chunks) == 2                                         # words merged per page, not one chunk per word
+    assert document["details"]["info"]["plan"]["ocr_pages"] == 2 and document["details"]["info"]["plan"]["calls"] == 2
+    chunks = chunks_of(document["id"])
+    assert {c[2] for c in chunks} == {1, 2, 3}                          # page 3 did not overwrite page 2
+    by_page = {c[2]: c[5] for c in chunks}
+    assert "Company data must be retained for 90 days." in by_page[2] and "Section: Scanned policy" in by_page[2]
+    assert "Second scanned page." in by_page[3]
 
     again, _ = upload(second_session, "scan-copy.pdf", data, "application/pdf")
-    assert FakeOCR.calls == [2, 3] and again["details"]["from_cache"] is True   # re-upload costs no OCR calls
+    assert FakeOCRProvider.requests == [[2, 3]] and again["details"]["from_cache"] is True   # re-upload: no OCR call
 
     llm.answer = "Company data must be retained for 90 days [EVIDENCE 1]."
     assert ask(second_session, "How many days must company data be retained for?")["citations"]
 
 
-def test_without_an_ocr_key_nothing_is_cached_so_a_later_upload_can_use_ocr(client, upload, monkeypatch):
-    import app.jobs as jobs
-    from app.config import settings
-    FakeOCR.calls = []
-    monkeypatch.setattr(jobs, "NVIDIAOCRClient", FakeOCR)
+def test_without_an_ocr_provider_nothing_is_cached_so_a_later_upload_can_use_ocr(client, upload, monkeypatch):
+    import app.specialists.run as run
+    FakeOCRProvider.requests = []
     data = make_scanned_pdf()
     first, _ = upload(new_session(client), "scan.pdf", data, "application/pdf")
-    assert first["status"] == "ocr_unavailable" and FakeOCR.calls == []
+    assert first["status"] == "ocr_unavailable" and FakeOCRProvider.requests == []
+    assert any(c[2] == 1 for c in chunks_of(first["id"]))              # the native page is searchable meanwhile
 
-    monkeypatch.setattr(settings, "nvidia_api_key", "test-key")
+    monkeypatch.setattr(run, "get_ocr_provider", lambda: FakeOCRProvider())
     second, _ = upload(new_session(client), "scan.pdf", data, "application/pdf")
-    assert second["status"] == "indexed" and FakeOCR.calls == [2, 3]
+    assert second["status"] == "indexed" and FakeOCRProvider.requests == [[2, 3]]
 
 
 # ---- spreadsheets -------------------------------------------------------------------------

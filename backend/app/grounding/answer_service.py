@@ -14,6 +14,7 @@ class GroundedAnswerService:
         provider: str,
         model: str,
         language_hint: str | None = None,
+        allow_uncited: bool = False,
     ):
         decision = assess_evidence(query, evidence)
         if not decision.sufficient:
@@ -45,7 +46,7 @@ class GroundedAnswerService:
         )
 
         answer, citations, grounded = finalize_answer(
-            response.text, decision.selected, require_citations=True
+            response.text, decision.selected, require_citations=True, allow_uncited=allow_uncited
         )
 
         return {

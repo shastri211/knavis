@@ -9,14 +9,32 @@ class Settings(BaseSettings):
     # Relative DATA_DIR values resolve against the project root, never the process CWD,
     # so the database, uploads and renders always land in one place.
     data_dir:Path=BACKEND_DIR/'data'; nvidia_api_key:str=''; groq_api_key:str=''; openrouter_api_key:str=''; assemblyai_api_key:str=''
-    nvidia_base_url:str='https://integrate.api.nvidia.com/v1'; nvidia_ocr_base_url:str='https://ai.api.nvidia.com/v1/ocr'; groq_base_url:str='https://api.groq.com/openai/v1'; openrouter_base_url:str='https://openrouter.ai/api/v1'
+    nvidia_base_url:str='https://integrate.api.nvidia.com/v1'; nvidia_ocr_base_url:str='https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2'; groq_base_url:str='https://api.groq.com/openai/v1'; openrouter_base_url:str='https://openrouter.ai/api/v1'
     qdrant_url:str=''; qdrant_api_key:str=''; qdrant_collection:str=''; openrouter_model:str=''
-    embedding_model:str='nvidia/llama-nemotron-embed-1b-v2'; embedding_dimensions:int|None=None
-    default_provider:str='nvidia'; default_model:str='meta/llama-3.1-8b-instruct'; max_upload_mb:int=50; max_message_chars:int=20000; max_agent_retrieval_calls:int=2; top_k_rerank:int=12
+    embedding_model:str='nvidia/nemotron-3-embed-1b'; embedding_dimensions:int|None=None
+    default_provider:str='groq'; default_model:str='openai/gpt-oss-20b'; max_upload_mb:int=50; max_message_chars:int=20000; max_agent_retrieval_calls:int=2; top_k_rerank:int=12
     # Evidence gate. A chunk is usable when its dense cosine similarity reaches
     # evidence_min_dense OR it covers at least evidence_min_coverage of the question's
     # content terms. At most evidence_max_items chunks are sent to the LLM.
     evidence_min_dense:float=0.35; evidence_min_coverage:float=0.5; evidence_max_items:int=8
+    # Hosted specialists (OCR, figure description, speech-to-text). Every *_provider setting is
+    # "auto" (first configured provider in the documented order), a provider name, or "none".
+    mistral_api_key:str=''; gemini_api_key:str=''
+    ocr_provider:str='auto'              # mistral | nvidia
+    vision_provider:str='auto'           # groq | gemini
+    vision_model:str='qwen/qwen3.8-27b'  # Groq vision model id (provider catalogs change; verify with check_config)
+    gemini_vision_model:str='gemini-2.5-flash-lite'
+    asr_provider:str='auto'              # groq | assemblyai
+    asr_model:str='whisper-large-v3-turbo'
+    # Work above this many hosted calls for one document waits for confirmation instead of spending quota.
+    confirm_above_calls:int=25
+    vision_max_figures_per_doc:int=8
+    # Gemini's free tier uses submitted content to improve Google's products. It stays off unless the
+    # owner of the data opts in here.
+    allow_free_tier_data_use:bool=False
+    # Override the built-in conservative quota defaults with your account's real limits, e.g.
+    # QUOTA_OVERRIDES={"mistral_ocr":{"pages":{"minute":60,"day":2000}}}
+    quota_overrides:dict[str,dict[str,dict[str,int]]]={}
     model_config=SettingsConfigDict(env_file=PROJECT_ROOT / '.env', extra='ignore')
 
     @field_validator('data_dir', mode='after')

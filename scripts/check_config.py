@@ -3,10 +3,15 @@ from collections import Counter
 from pathlib import Path
 import sys
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from app.config import settings
 from app.providers import models
+from app.specialists.asr import asr_candidates
+from app.specialists.ocr import get_ocr_provider
+from app.specialists.vision import get_vision_provider
 
 
 def state(value: str) -> str:
@@ -27,6 +32,8 @@ for name, value in (
     ("Groq", settings.groq_api_key),
     ("OpenRouter", settings.openrouter_api_key),
     ("AssemblyAI", settings.assemblyai_api_key),
+    ("Mistral", settings.mistral_api_key),
+    ("Gemini", settings.gemini_api_key),
     ("Qdrant Cloud", settings.qdrant_url),
 ):
     print(f"{name}: {state(value)}")
@@ -53,6 +60,79 @@ if settings.nvidia_api_key and not settings.embedding_dimensions:
     warnings.append("NVIDIA_API_KEY is set but EMBEDDING_DIMENSIONS is not; dense indexing will fail")
 if not any((settings.nvidia_api_key, settings.groq_api_key, settings.openrouter_api_key)):
     warnings.append("No chat provider key is configured; only fixed replies and utilities will work")
+
+# ---- hosted specialists ----
+ocr, vision = get_ocr_provider(), get_vision_provider()
+print()
+print("Specialists:")
+print(f"  OCR (scanned pages, images):  {ocr.name if ocr else 'not available (set MISTRAL_API_KEY or NVIDIA_API_KEY)'}")
+print(f"  Figure descriptions:          {vision.name + ' / ' + settings.vision_model if vision and vision.name == 'groq' else (vision.name if vision else 'not available (set GROQ_API_KEY)')}")
+print(f"  Speech-to-text:               {', '.join(p.name for p in asr_candidates(Path(__file__))) or 'not available (set GROQ_API_KEY or ASSEMBLYAI_API_KEY)'}")
+print(f"  Large jobs wait for a yes above {settings.confirm_above_calls} hosted calls; at most {settings.vision_max_figures_per_doc} figures per document.")
+if settings.gemini_api_key and not settings.allow_free_tier_data_use:
+    print("  Gemini key present but NOT used: its free tier uses content to improve Google's products "
+          "(set ALLOW_FREE_TIER_DATA_USE=true to allow it).")
+if not ocr:
+    warnings.append("No OCR provider: scanned PDFs and images stay unsearchable (marked ocr_unavailable)")
+
+# ---- model ids against the providers' own catalogs (free list calls, no tokens) ----
+def listed_models(base_url: str, key: str) -> set[str] | None:
+    try:
+        response = httpx.get(f"{base_url.rstrip('/')}/models", headers={"Authorization": f"Bearer {key}"}, timeout=20)
+        response.raise_for_status()
+        return {m["id"] for m in response.json().get("data", [])}
+    except Exception as exc:
+        warnings.append(f"Could not list models from {base_url}: {type(exc).__name__}")
+        return None
+
+if "--online" in sys.argv:
+    print()
+    print("Checking configured model ids against provider catalogs...")
+    if settings.groq_api_key:
+        available = listed_models(settings.groq_base_url, settings.groq_api_key)
+        if available is not None:
+            wanted = {"VISION_MODEL": settings.vision_model, "ASR_MODEL": settings.asr_model}
+            wanted.update({f"catalog {m['id']}": m["id"] for m in models() if m["provider"] == "groq"})
+            for label, model_id in wanted.items():
+                print(f"  groq  {model_id:40} {'ok' if model_id in available else 'NOT LISTED'}")
+                if model_id not in available:
+                    warnings.append(f"Groq does not list {model_id} ({label}); update it or requests using it will fail")
+    if settings.nvidia_api_key:
+        available = listed_models(settings.nvidia_base_url, settings.nvidia_api_key)
+        if available is not None:
+            for m in models():
+                if m["provider"] == "nvidia":
+                    print(f"  nvidia {m['id']:39} {'ok' if m['id'] in available else 'NOT LISTED'}")
+                    if m["id"] not in available:
+                        warnings.append(f"NVIDIA does not list {m['id']}")
+else:
+    print()
+    print("(Run with --online to list model ids; --probe to really call each catalog model once.)")
+
+# A provider's /models list proves little (NVIDIA lists models that 404 when invoked), so --probe makes one
+# tiny real chat call per catalog model. It costs a few tokens of free-tier quota per model.
+if "--probe" in sys.argv:
+    import asyncio
+    from app import providers as provider_module
+
+    async def probe(item):
+        try:
+            reply = await provider_module.chat(item["provider"], item["id"], [{"role": "user", "content": "Reply with the single word OK."}],
+                                               max_tokens=200, temperature=0)
+            return f"ok ({reply.text.strip()[:20]!r})"
+        except Exception as exc:
+            return f"FAILED: {type(exc).__name__}: {str(exc)[:80]}"
+
+    print()
+    print("Calling each catalog model once...")
+    keys = {"nvidia": settings.nvidia_api_key, "groq": settings.groq_api_key, "openrouter": settings.openrouter_api_key}
+    for item in models():
+        if not keys.get(item["provider"]):
+            continue
+        result = asyncio.run(probe(item))
+        print(f"  {item['provider']:10} {item['id']:42} {result}")
+        if result.startswith("FAILED"):
+            warnings.append(f"{item['provider']}/{item['id']} did not answer a chat call; remove it from the catalog or fix the account")
 
 print()
 if warnings:

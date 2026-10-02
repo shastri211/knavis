@@ -20,8 +20,26 @@ def test_thousands_separators_and_non_ascii_digits_are_normalised():
     assert verify_answer("Processing takes 14 days, the document states [EVIDENCE 1].", evidence).supported
 
 
+def test_an_uncited_sentence_is_attributed_to_the_evidence_that_contains_it_or_rejected():
+    supported = verify_answer("Company data must be retained for 90 days.", EVIDENCE)
+    assert supported.supported and supported.claims[0].attributed and supported.claims[0].evidence_ids == [1]
+    assert not verify_answer("Company data must be retained for 7 years.", EVIDENCE).supported        # the number is not there
+    assert not verify_answer("The cafeteria serves vegetarian meals every single day.", EVIDENCE).supported   # nothing supports it
+
+
+def test_one_citation_at_the_end_of_a_line_covers_the_sentences_before_it():
+    """Models cite a paragraph once, at its end."""
+    answer = "Company data must be retained for 90 days. Backups are kept for 30 days. Both rules apply [EVIDENCE 1]."
+    result = verify_answer(answer, EVIDENCE)
+    assert result.supported and all(c.evidence_ids == [1] for c in result.claims) and not any(c.attributed for c in result.claims)
+
+
+def test_an_invented_sentence_on_the_same_line_does_not_borrow_the_citation():
+    answer = "Company data must be retained for 90 days [EVIDENCE 1]. The retention period is mandated by European law."
+    assert not verify_answer(answer, EVIDENCE).supported
+
+
 def test_uncited_factual_sentence_fails_but_courtesy_and_lead_ins_do_not():
-    assert not verify_answer("Company data must be retained for 90 days.", EVIDENCE).supported
     assert verify_answer("Company data must be retained for 90 days [EVIDENCE 1]. Let me know if you need more.", EVIDENCE).supported
     assert verify_answer("The policy lists these rules:\n- Company data must be retained for 90 days [EVIDENCE 1].", EVIDENCE).supported
 
@@ -64,3 +82,9 @@ def test_same_document_numbers_are_not_a_conflict_but_cross_document_differences
     assert len(conflicts) == 1 and conflicts[0].evidence_ids == [1, 2]
     # a conflict is reported, never a reason on its own to reject the answer
     assert verify_answer("Keep data 90 days [EVIDENCE 1].", cross_doc).supported
+
+
+def test_citations_written_with_fullwidth_or_round_brackets_are_understood():
+    """gpt-oss writes 【EVIDENCE 1】; discarding such an answer would throw away a correct one."""
+    assert extract_citation_ids("Retained for **90 days**【EVIDENCE 1】. Backups too (EVIDENCE 2).") == [1, 2]
+    assert verify_answer("Company data must be retained for 90 days【EVIDENCE 1】.", EVIDENCE).supported

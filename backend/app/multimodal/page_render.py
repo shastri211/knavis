@@ -18,3 +18,19 @@ def render_pdf_pages(pdf_path: Path, output_dir: Path, dpi=144, pages: set[int] 
             pix.save(target)
             results.append((page_no, target))
     return results
+
+
+def render_page_png(pdf_path: Path, page_no: int, dpi=144, clip: tuple[float, float, float, float] | None = None) -> bytes:
+    """One PDF page (or a clipped region of it) as PNG bytes, in memory: nothing is written to disk."""
+    with fitz.open(pdf_path) as doc:
+        page = doc[page_no - 1]
+        pixmap = page.get_pixmap(dpi=dpi, alpha=False, clip=fitz.Rect(*clip) if clip else None)
+        return pixmap.tobytes("png")
+
+
+def subset_pdf(pdf_path: Path, pages: list[int]) -> bytes:
+    """A new PDF holding only the given 1-based pages (in that order), so only those leave the machine."""
+    with fitz.open(pdf_path) as source, fitz.open() as subset:
+        for page in pages:
+            subset.insert_pdf(source, from_page=page - 1, to_page=page - 1)
+        return subset.tobytes()
