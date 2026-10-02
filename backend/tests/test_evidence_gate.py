@@ -1,6 +1,6 @@
 from app.grounding.evidence_gate import assess_evidence
 from app.retrieval.bm25 import BM25Index
-from app.retrieval.chunker import chunk_text
+from types import SimpleNamespace
 from app.retrieval.rrf import reciprocal_rank_fusion
 from app.retrieval.text import content_terms, is_overview_query, lexical_coverage, tokenize
 
@@ -9,7 +9,7 @@ QUESTION = "How long must company data be retained?"
 
 
 def _fused(texts):
-    chunks = [c for i, t in enumerate(texts) for c in chunk_text(f"d:{i}", t, metadata={"source": "p.txt"})]
+    chunks = [SimpleNamespace(id=f"d:{i}", text=t, metadata={"source": "p.txt"}) for i, t in enumerate(texts)]
     index = BM25Index(); index.build(chunks)
     return reciprocal_rank_fusion([[], index.search(QUESTION, 12)], limit=12)
 

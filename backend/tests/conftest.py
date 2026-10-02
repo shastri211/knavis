@@ -117,6 +117,28 @@ def make_pdf():
     pdf.close()
     return data
 
+def make_html():
+    return f"<html><head><title>Policy</title></head><body><h1>Retention Policy</h1><p>{FACT}</p><p>{OTHER_FACTS}</p></body></html>".encode()
+
+def make_tsv():
+    return f"rule\tdetail\nretention\t{FACT}\nbackups\tBackups are kept for 30 days.\n".encode()
+
+def make_xml():
+    return f"<policy><retention>{FACT}</retention><backups>Backups are kept for 30 days.</backups></policy>".encode()
+
+def make_srt():
+    return f"1\n00:00:01,000 --> 00:00:06,000\n{FACT}\n\n2\n00:00:07,000 --> 00:00:09,000\nBackups are kept for 30 days.\n".encode()
+
+def make_eml():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = "a@example.com", "b@example.com", "Retention policy"
+    msg.set_content(f"{FACT} {OTHER_FACTS}")
+    return bytes(msg)
+
+def make_yaml():
+    return f"policy:\n  retention: {FACT}\n  backups: Backups are kept for 30 days.\n".encode()
+
 SAMPLES = {
     "txt": ("policy.txt", make_txt, "text/plain"),
     "md": ("policy.md", make_txt, "text/markdown"),
@@ -126,6 +148,12 @@ SAMPLES = {
     "pptx": ("policy.pptx", make_pptx, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
     "xlsx": ("policy.xlsx", make_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "pdf": ("policy.pdf", make_pdf, "application/pdf"),
+    "html": ("policy.html", make_html, "text/html"),
+    "tsv": ("policy.tsv", make_tsv, "text/tab-separated-values"),
+    "xml": ("policy.xml", make_xml, "application/xml"),
+    "srt": ("policy.srt", make_srt, "application/x-subrip"),
+    "eml": ("policy.eml", make_eml, "message/rfc822"),
+    "yaml": ("policy.yaml", make_yaml, "application/yaml"),
 }
 
 

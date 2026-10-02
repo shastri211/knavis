@@ -1,3 +1,5 @@
+import hashlib
+import logging
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -18,6 +20,7 @@ from .agent_graph.graph import invoke_agent_graph
 from .integration.pipeline import get_pipeline
 
 router = APIRouter()
+logger = logging.getLogger("mragrag")
 provider_service = ProviderService()
 pipeline = get_pipeline()
 router_agent = SemanticRouter(provider_service)
@@ -77,7 +80,8 @@ async def chat_route(p: MessageCreate, s: Session = Depends(db)):
     except ProviderError as e: raise HTTPException(400, str(e))
     user_msg = Message(session_id=session.id, role="user", content=p.content,
                        provider=provider, model=model)
-    s.add(user_msg); s.flush()
+    # Commit now: the turn below may write (caches) from other connections, so this session must not hold a write lock.
+    s.add(user_msg); s.commit()
 
     effective_content = p.content
     if p.content.strip().casefold() in {"why", "why?", "kyun", "kyun?", "क्यों", "क्यों?"}:
@@ -88,6 +92,7 @@ async def chat_route(p: MessageCreate, s: Session = Depends(db)):
     try:
         result = await invoke_agent_graph(session.id, effective_content, provider, model)
     except Exception:
+        logger.exception("Chat turn failed for session %s", session.id)
         result = {
             "answer": "The selected model is unavailable or not configured. Retry the request or select a configured model.",
             "route": "blocked",
@@ -132,6 +137,17 @@ async def upload(
     except GuardrailError as e: raise HTTPException(400, str(e))
 
     name = Path(file.filename or "upload.bin").name
+
+    # The same file already in this session is not processed (or paid for) twice.
+    content_hash = hashlib.sha256(raw).hexdigest()
+    for existing in s.query(Document).filter(Document.session_id == session_id, Document.status.in_(("queued", "indexed"))):
+        if (existing.metadata_json or {}).get("content_hash") == content_hash:
+            job = s.query(Job).filter(Job.document_id == existing.id).first()
+            return {
+                "document": DocumentOut.model_validate(existing), "duplicate": True,
+                "job": {"id": job.id, "status": job.status, "progress": job.progress} if job else None,
+            }
+
     target = settings.upload_dir / (str(uuid4()) + "_" + name)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(raw)
@@ -139,7 +155,7 @@ async def upload(
     doc = Document(
         session_id=session_id, filename=name,
         content_type=file.content_type or "application/octet-stream",
-        path=str(target), status="queued"
+        path=str(target), status="queued", metadata_json={"content_hash": content_hash},
     )
     s.add(doc); s.flush()
 

@@ -1,70 +1,79 @@
+import asyncio
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal
-from .models import Document, Evidence, Job
-from .ingestion import EvidenceNode, extract_document
-from .integration.pipeline import get_pipeline
+from .models import Document, Job
 from .guardrails import sanitize_error
+from .ingest.chunker import build_chunks
+from .ingest.elements import OCR_TEXT, TRANSCRIPT, Element, ExtractionError, format_clock
+from .ingest.extract import extract_document
+from .ingest.store import (
+    get_cached_extraction, materialize, put_cached_extraction, save_chunks, save_elements, sha256_file,
+)
+from .integration.pipeline import get_pipeline
 from .multimodal.assemblyai import AssemblyAIClient
 from .multimodal.audio_evidence import transcript_to_evidence
 from .multimodal.image_evidence import ocr_to_evidence
 from .multimodal.ocr import NVIDIAOCRClient
 from .multimodal.page_render import render_pdf_pages
 
-
 IMAGE_MIME_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
     ".tif": "image/tiff", ".tiff": "image/tiff", ".bmp": "image/bmp", ".gif": "image/gif",
 }
 
+# Specialist outcomes that are final: the (paid, rate-limited) work was done, so the result is cached.
+_CACHEABLE = {"complete", "ocr_no_text", "audio_no_text"}
 
-async def _ocr_nodes(path: Path, document_id: str, source_name: str, pages: set[int] | None = None):
+
+async def _ocr_elements(path: Path, document_id: str, pages: set[int] | None = None):
+    """OCR a standalone image, or only the given pages of a PDF."""
     if not settings.nvidia_api_key:
         return [], "ocr_unavailable"
     client = NVIDIAOCRClient(settings.nvidia_api_key, settings.nvidia_ocr_base_url)
     if path.suffix.lower() == ".pdf":
-        rendered = render_pdf_pages(path, settings.data_dir / "renders" / document_id, pages=pages)
+        rendered = await asyncio.to_thread(
+            render_pdf_pages, path, settings.data_dir / "renders" / document_id, pages=pages)
     else:
         rendered = [(None, path)]
-    nodes = []
+    elements = []
     for page, image_path in rendered:
         # Rendered PDF pages are always PNG; standalone images need their real MIME type.
         mime_type = "image/png" if page else IMAGE_MIME_TYPES.get(image_path.suffix.lower(), "application/octet-stream")
         detections = await client.image_bytes(image_path.read_bytes(), mime_type, page)
         for evidence in ocr_to_evidence(document_id, detections):
-            nodes.append(EvidenceNode(
-                id=evidence.id, document_id=document_id, source_name=source_name, modality="ocr",
-                text=evidence.text, page=evidence.page,
-                metadata={"source_type": "ocr", "bbox": evidence.bbox, "ocr_confidence": evidence.confidence,
-                          "image_reference": image_path.name},
+            elements.append(Element(
+                id=evidence.id.split(":", 1)[1], kind=OCR_TEXT, text=evidence.text, page=evidence.page,
+                locator=f"page {evidence.page}" if evidence.page else "image", bbox=evidence.bbox,
+                source="ocr", confidence=evidence.confidence,
+                meta={"image_reference": image_path.name},
             ))
-    return nodes, "complete" if nodes else "ocr_no_text"
+    return elements, "complete" if elements else "ocr_no_text"
 
 
-async def _audio_nodes(path: Path, document_id: str, source_name: str):
+async def _audio_elements(path: Path, document_id: str):
     if not settings.assemblyai_api_key:
         return [], "audio_unavailable"
     transcript = await AssemblyAIClient(settings.assemblyai_api_key).transcribe_file(path)
-    segments = transcript_to_evidence(document_id, transcript)
-    nodes = [EvidenceNode(
-        id=segment.id, document_id=document_id, source_name=source_name, modality="audio_transcript",
-        text=segment.text,
-        metadata={"source_type": "audio", "transcript_id": transcript.transcript_id,
-                  "language": segment.language, "speaker": segment.speaker,
-                  "start_seconds": segment.start_seconds, "end_seconds": segment.end_seconds,
-                  "language_confidence": transcript.language_confidence},
-    ) for segment in segments]
-    if not nodes and transcript.text.strip():
-        nodes.append(EvidenceNode(
-            id=f"{document_id}:transcript", document_id=document_id, source_name=source_name,
-            modality="audio_transcript", text=transcript.text,
-            metadata={"source_type": "audio", "transcript_id": transcript.transcript_id,
-                      "language": transcript.language_code, "language_confidence": transcript.language_confidence},
+    base = {"transcript_id": transcript.transcript_id, "language_confidence": transcript.language_confidence}
+    elements = [
+        Element(
+            id=segment.id.split(":", 1)[1], kind=TRANSCRIPT, text=segment.text, source="asr",
+            locator=f"{format_clock(segment.start_seconds)}-{format_clock(segment.end_seconds)}",
+            meta={**base, "language": segment.language, "speaker": segment.speaker,
+                  "start_s": segment.start_seconds, "end_s": segment.end_seconds},
+        )
+        for segment in transcript_to_evidence(document_id, transcript)
+    ]
+    if not elements and transcript.text.strip():
+        elements.append(Element(
+            id="transcript", kind=TRANSCRIPT, text=transcript.text, source="asr",
+            meta={**base, "language": transcript.language_code},
         ))
-    return nodes, "complete" if nodes else "audio_no_text"
+    return elements, "complete" if elements else "audio_no_text"
 
 
 async def run_ingestion(job_id: str):
@@ -82,47 +91,63 @@ async def run_ingestion(job_id: str):
             return
 
         path = Path(doc.path)
-        kind, nodes, meta = extract_document(path, doc.id)
-        job.progress, job.stage = 35, "processing_specialists"
+        content_hash = (doc.metadata_json or {}).get("content_hash") or await asyncio.to_thread(sha256_file, path)
+
+        # Same file seen before: reuse its elements, including any OCR/transcription already paid for.
+        cached = get_cached_extraction(db, content_hash)
+        specialist_status = "complete"
+        if cached:
+            kind, elements, info = cached
+            info = {**info, "from_cache": True}
+            job.progress, job.stage = 35, "reusing_cache"
+        else:
+            result = await asyncio.to_thread(extract_document, path, settings.data_dir / "converted" / doc.id)
+            kind, elements, info = result.kind, result.elements, {**result.info, "from_cache": False}
+            job.progress, job.stage = 35, "processing_specialists"
+            db.commit()
+
+            if kind == "image":
+                elements, specialist_status = await _ocr_elements(path, doc.id)
+            elif kind == "audio":
+                elements, specialist_status = await _audio_elements(path, doc.id)
+            elif kind == "pdf" and info.get("ocr_pages"):
+                ocr_elements, specialist_status = await _ocr_elements(path, doc.id, set(info["ocr_pages"]))
+                elements = elements + ocr_elements
+            if specialist_status in _CACHEABLE:
+                put_cached_extraction(db, content_hash, kind, elements, info)
         db.commit()
 
-        specialist_status = "complete"
-        if kind == "image":
-            nodes, specialist_status = await _ocr_nodes(path, doc.id, doc.filename)
-        elif kind == "audio":
-            nodes, specialist_status = await _audio_nodes(path, doc.id, doc.filename)
-        elif kind == "pdf":
-            empty_pages = {node.page for node in nodes if node.metadata and node.metadata.get("requires_ocr") and node.page}
-            if empty_pages:
-                ocr_nodes, specialist_status = await _ocr_nodes(path, doc.id, doc.filename, empty_pages)
-                nodes.extend(ocr_nodes)
-
-        text_nodes = [node for node in nodes if node.text.strip()]
         job.progress, job.stage = 55, "storing_evidence"
         db.commit()
-        for node in text_nodes:
-            db.merge(Evidence(
-                id=node.id, document_id=doc.id, kind=node.modality, text=node.text, page=node.page,
-                metadata_json={**(node.metadata or {}), "logical_document_id": node.logical_document_id,
-                               "slide": node.slide, "sheet": node.sheet},
-            ))
+        elements = materialize(elements, doc.id)
+        stored = save_elements(db, doc, elements)
+        chunks = build_chunks(elements)
+        rows = save_chunks(db, doc, chunks)
         db.commit()
 
-        if text_nodes:
+        dense = None
+        if rows:
             job.progress, job.stage = 75, "indexing"
             db.commit()
-            await get_pipeline().index_evidence_nodes(job.session_id, text_nodes)
+            dense = await get_pipeline().index_chunks(job.session_id, rows, doc.filename)
 
         unavailable = specialist_status in {"ocr_unavailable", "audio_unavailable"}
-        doc.status = specialist_status if unavailable else ("indexed" if text_nodes else specialist_status)
-        doc.metadata_json = {"detected_type": kind, "evidence_nodes": len(text_nodes),
-                             "specialist_status": specialist_status, "logical_documents": meta.get("logical_documents")}
+        doc.status = specialist_status if unavailable else ("indexed" if rows else "no_text")
+        doc.metadata_json = {
+            **(doc.metadata_json or {}), "detected_type": kind, "content_hash": content_hash,
+            "elements": stored, "chunks": len(rows), "specialist_status": specialist_status,
+            "from_cache": info["from_cache"], "info": info, "embedding": dense,
+            "logical_documents": info.get("logical_documents"),
+        }
         job.status, job.progress, job.stage = "completed", 100, doc.status
         db.commit()
     except Exception as exc:
+        db.rollback()
         job = db.get(Job, job_id)
         if job:
-            job.status, job.stage, job.error = "failed", "failed", sanitize_error(exc)
+            # ExtractionError messages are written for users; anything else is sanitized.
+            job.status, job.stage = "failed", "failed"
+            job.error = str(exc) if isinstance(exc, ExtractionError) else sanitize_error(exc)
             doc = db.get(Document, job.document_id)
             if doc:
                 doc.status = "failed"

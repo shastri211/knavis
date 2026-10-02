@@ -1,11 +1,7 @@
 from pathlib import Path
 from .config import settings
 
-ALLOWED_EXTENSIONS = {
-    ".pdf",".docx",".pptx",".xlsx",".csv",".json",".txt",".md",".markdown",".log",
-    ".png",".jpg",".jpeg",".webp",".tif",".tiff",
-    ".mp3",".wav",".m4a",".mp4",".aac",".flac",".ogg",".webm",
-}
+from .ingest.registry import ALLOWED_EXTENSIONS   # the one list of supported file types
 
 class GuardrailError(ValueError):
     pass
