@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     rate_limit_auth_per_minute:int=10
     # Only behind a reverse proxy you control: take the client address from X-Forwarded-For.
     trust_proxy_headers:bool=False
+    # Empty: SQLite in the data directory. Or e.g. postgresql://user:password@host:5432/knavis (see DEPLOYMENT.md).
+    database_url:str=''
     # How many documents are extracted and indexed at once; the rest wait their turn.
     ingestion_concurrency:int=2
     # Spreadsheet analytics: questions that need computing (totals, counts, the highest group) are answered with

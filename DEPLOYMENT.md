@@ -25,6 +25,50 @@ docker compose up --build   # http://127.0.0.1:8080
 - Legacy Office formats (.doc, .xls, .ppt) need LibreOffice, which the image does not include; modern formats do not.
 - CI builds both images, starts the stack and smoke-tests it through the proxy on every change.
 
+## Operating it
+
+- **Administration without e-mail.** There is no mail service, so an operator handles accounts from the command line, where
+  the data lives (in Docker: `docker compose exec backend python -m app.admin ...`):
+
+  ```bash
+  python -m app.admin users                      # accounts with chats, documents, storage, active sign-ins
+  python -m app.admin reset-password EMAIL       # prompts for the new password; ends every sign-in of that account
+  python -m app.admin create-user EMAIL          # for servers with ALLOW_REGISTRATION=false
+  python -m app.admin revoke-tokens [EMAIL]      # sign one account (or everyone) out
+  python -m app.admin delete-user EMAIL --yes    # the account and everything it owns
+  python -m app.admin usage                      # totals and the biggest accounts
+  ```
+
+  People can change their own password in the app (it ends their other sign-ins).
+- **Restarts are safe.** Every ingestion job records how it should run and how often it was started. At start-up, jobs
+  that were queued or running are resumed (a job that keeps dying is failed with a message after three starts); OCR,
+  figure and embedding results are cached, so nothing already paid for is paid twice. At most `INGESTION_CONCURRENCY`
+  documents are processed at once.
+- **Schema changes are migrations.** The schema belongs to Alembic (`backend/migrations`) and is brought up to date at
+  start-up. After changing a model: `cd backend && alembic revision --autogenerate -m "what changed"`, read the generated
+  file, commit it. A test fails if a model and the migrations disagree. Installs that predate Alembic are adopted
+  automatically (missing nullable columns are added, then the database is stamped at the baseline) with their data intact.
+
+## Moving to PostgreSQL
+
+SQLite is the default and is fine for a few users on one host. For more writers, use PostgreSQL:
+
+```bash
+POSTGRES_PASSWORD=choose-one docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+```
+
+or set `DATABASE_URL=postgresql://user:password@host:5432/knavis` for a database you run yourself. The keyword index
+uses a `tsvector` table with a GIN index there instead of SQLite FTS5 (same terms, same Hindi handling). To move an
+existing SQLite install: create an empty database, then, with the old settings still in place,
+
+```bash
+python -m app.admin copy-database postgresql://user:password@host:5432/knavis
+```
+
+copies every row (it refuses a database that already has data), and after you set `DATABASE_URL` and restart, the keyword
+index rebuilds itself. Uploaded files, spreadsheet tables and vectors stay where they are (data directory, Qdrant). CI runs
+the whole test suite on PostgreSQL as well as SQLite.
+
 ## Putting it on the internet
 
 The compose file binds to `127.0.0.1` on purpose. To serve other people:
@@ -53,13 +97,13 @@ The compose file binds to `127.0.0.1` on purpose. To serve other people:
 
 These are real and deliberate for a free-tier, single-host design:
 
-- **One process.** Local Qdrant, the rate limiter and background ingestion live in the backend process. Run exactly one
+- **One process.** Local Qdrant, the rate limiter and the ingestion worker live in the backend process. Run exactly one
   worker (the Dockerfile does). Scaling out needs a Qdrant server, a shared rate-limit store (Redis), and a job queue
-  instead of FastAPI background tasks.
-- **SQLite.** Fine for a few users on one host; move to PostgreSQL with Alembic migrations before many writers. Until
-  then startup adds new nullable columns itself (`app/migrations.py`) but cannot do anything harder.
-- **No virus scanning** of uploads, and no email verification or password reset (there is no mail service). A lost
-  password means an operator deleting the account's row.
+  shared between processes; jobs are persisted and resumed after a restart, but only one process runs them.
+- **Spreadsheet tables and uploads stay on local disk** (per-session SQLite files and the data directory), whichever
+  database holds the application data. Back up the data directory as well as the database.
+- **No virus scanning** of uploads, and no e-mail verification or self-service password reset (there is no mail service):
+  a forgotten password is reset by an operator with `python -m app.admin reset-password`.
 - **Lexical evidence gate.** Plausible-sounding questions the documents cannot answer can still reach the model, which
   is then told to abstain. `python -m app.evaluation.run` measures this (see `eval/README.md`).
 - **Free-tier terms.** Providers change limits, models and data terms without notice; check them before sending

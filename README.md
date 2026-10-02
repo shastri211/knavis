@@ -149,6 +149,16 @@ Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS`
 - **Interface:** sign-in screen, delete or rename chats, remove documents, Process/Skip/Retry for paused documents,
   upload errors, spreadsheet answers shown as tables with saved citations, and a drawer sidebar on phones.
 
+## Operating and scaling
+
+- **Restart-safe uploads:** unfinished ingestion jobs resume at start-up (three attempts, then a clear failure), keep the
+  person's earlier decision, and run at most `INGESTION_CONCURRENCY` at a time.
+- **Administration:** `python -m app.admin users | reset-password | create-user | revoke-tokens | delete-user | usage`
+  (no mail service exists, so this is how a forgotten password is handled); people can also change their own password.
+- **Migrations:** the schema is managed by Alembic and upgraded at start-up; installs from before Alembic are adopted
+  with their data. **PostgreSQL** is supported (`DATABASE_URL`, or the `docker-compose.postgres.yml` overlay) with
+  `python -m app.admin copy-database` to move an existing SQLite install. See `DEPLOYMENT.md`.
+
 ## Running in Docker
 
 `docker compose up --build` serves the app on http://127.0.0.1:8080 (nginx in front of the backend, data in a named

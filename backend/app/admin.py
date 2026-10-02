@@ -6,6 +6,7 @@
     python -m app.admin revoke-tokens [EMAIL]       # sign one account (or everyone) out
     python -m app.admin delete-user EMAIL --yes     # removes the account and all its data
     python -m app.admin usage                       # totals, and the biggest accounts by storage
+    python -m app.admin copy-database URL           # copy every row of the current database into an empty one (SQLite -> PostgreSQL)
 
 Run it where the data lives (in Docker: ``docker compose exec backend python -m app.admin users``).
 """
@@ -93,6 +94,38 @@ def usage(db: Session) -> dict:
     }
 
 
+def copy_database(target_url: str, batch: int = 1000) -> dict[str, int]:
+    """Copy every row of the database in use into another one, e.g. SQLite into a new PostgreSQL database.
+
+    The target is brought to the current schema first and must be empty. Returns the rows copied per table. The
+    keyword index is not copied: it is rebuilt from the chunks the first time the application starts on the target.
+    """
+    from sqlalchemy import create_engine, func, select
+
+    from .db import Base, database_url, engine as source
+    from .migrations import upgrade_database
+
+    if target_url.startswith(("postgresql://", "postgres://")):
+        target_url = "postgresql+psycopg://" + target_url.split("://", 1)[1]
+    if target_url == database_url():
+        raise AdminError("The target is the database already in use.")
+    target = create_engine(target_url)
+    upgrade_database(target)
+    copied = {}
+    with source.connect() as src, target.begin() as dst:
+        for table in Base.metadata.sorted_tables:
+            if dst.execute(select(func.count()).select_from(table)).scalar():
+                raise AdminError(f"The target already has rows in {table.name}; copy into an empty database.")
+        for table in Base.metadata.sorted_tables:
+            total = 0
+            rows = src.execute(select(table)).mappings()
+            while chunk := rows.fetchmany(batch):
+                dst.execute(table.insert(), [dict(r) for r in chunk])
+                total += len(chunk)
+            copied[table.name] = total
+    return copied
+
+
 def _password(args) -> str:
     if args.password:
         return args.password
@@ -111,6 +144,8 @@ def main(argv=None) -> int:
         sub = commands.add_parser(name)
         sub.add_argument("email")
         sub.add_argument("--password", help=f"{MIN_PASSWORD}-{MAX_PASSWORD} characters; prompted for if omitted (preferred: it stays out of shell history)")
+    sub = commands.add_parser("copy-database")
+    sub.add_argument("url", help="e.g. postgresql://user:password@host:5432/knavis (must be empty)")
     sub = commands.add_parser("revoke-tokens")
     sub.add_argument("email", nargs="?")
     sub = commands.add_parser("delete-user")
@@ -137,6 +172,10 @@ def main(argv=None) -> int:
             elif args.command == "reset-password":
                 revoked = reset_password(db, args.email, _password(args))
                 print(f"Password changed for {args.email.strip().lower()}; {revoked} sign-in(s) ended.")
+            elif args.command == "copy-database":
+                copied = copy_database(args.url)
+                print("Copied " + ", ".join(f"{name}: {n}" for name, n in copied.items() if n) + ".")
+                print("Now set DATABASE_URL to the new database and restart; the keyword index rebuilds on first start.")
             elif args.command == "revoke-tokens":
                 print(f"{revoke_tokens(db, args.email)} sign-in(s) ended.")
             elif args.command == "delete-user":

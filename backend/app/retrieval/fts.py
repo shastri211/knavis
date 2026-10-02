@@ -1,12 +1,18 @@
-"""Persistent keyword index: one SQLite FTS5 table kept next to the chunks it indexes.
+"""Persistent keyword index, kept next to the chunks it indexes.
 
-Replaces the in-memory BM25 index that used to be rebuilt from every chunk on every question.
-Rows are written in the same transaction as the chunks (see ``ingest.store.save_chunks``), so the
-index cannot drift from them, and ``rebuild_if_stale`` repairs databases created before it existed.
+Replaces the in-memory BM25 index that used to be rebuilt from every chunk on every question. Rows are written in the
+same transaction as the chunks (see ``ingest.store.save_chunks``), so the index cannot drift from them, and
+``rebuild_if_stale`` repairs databases created before it existed.
 
-Text is reduced to the same stemmed content terms the evidence gate uses (``retrieval.text``), so a
-question "retained" finds "retain", and Hindi words stay whole: FTS5's unicode61 tokenizer keeps
-Devanagari vowel signs inside a word, and it only ever sees text that was already split on spaces.
+Text is reduced to the same stemmed content terms the evidence gate uses (``retrieval.text``), so a question
+"retained" finds "retain", and Hindi words stay whole. Two implementations, chosen by the database in use:
+
+* SQLite: an FTS5 table. Its unicode61 tokenizer keeps Devanagari vowel signs inside a word, and it only ever sees
+  text that was already split on spaces. Ranking is BM25.
+* PostgreSQL: a table with a ``tsvector`` built directly from the term list (``array_to_tsvector``), so no text
+  parser can split a Hindi word, and a GIN index. Ranking is ``ts_rank``.
+
+These tables are created here for whichever database is in use and are deliberately outside Alembic.
 """
 import logging
 import re
@@ -22,17 +28,31 @@ TABLE = "chunks_fts"
 _BATCH = 500
 
 
+def _postgres(db: Session) -> bool:
+    return db.get_bind().dialect.name == "postgresql"
+
+
 def ensure_table(db: Session) -> None:
-    # scope: indexed so a query only intersects posting lists of its own session; the id columns are payload.
-    db.execute(sql(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {TABLE} USING fts5("
-        "scope, terms, chunk_id UNINDEXED, document_id UNINDEXED, tokenize='unicode61 remove_diacritics 0')"
-    ))
+    if _postgres(db):
+        for statement in (
+            f"CREATE TABLE IF NOT EXISTS {TABLE} (chunk_id text PRIMARY KEY, session_id text NOT NULL, "
+            "document_id text NOT NULL, terms tsvector NOT NULL)",
+            f"CREATE INDEX IF NOT EXISTS {TABLE}_terms ON {TABLE} USING GIN (terms)",
+            f"CREATE INDEX IF NOT EXISTS {TABLE}_session ON {TABLE} (session_id)",
+            f"CREATE INDEX IF NOT EXISTS {TABLE}_document ON {TABLE} (document_id)",
+        ):
+            db.execute(sql(statement))
+    else:
+        # scope: indexed so a query only intersects posting lists of its own session; the id columns are payload.
+        db.execute(sql(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {TABLE} USING fts5("
+            "scope, terms, chunk_id UNINDEXED, document_id UNINDEXED, tokenize='unicode61 remove_diacritics 0')"
+        ))
     db.commit()
 
 
 def scope_token(session_id: str) -> str:
-    """The session as one FTS token (letters and digits only)."""
+    """The session as one FTS5 token (letters and digits only)."""
     return "s" + re.sub(r"[^0-9a-zA-Z]", "", session_id).lower()
 
 
@@ -41,6 +61,14 @@ def index_text(text: str) -> str:
 
 
 def _insert(db: Session, rows) -> None:
+    if _postgres(db):
+        db.execute(
+            sql(f"INSERT INTO {TABLE}(chunk_id, session_id, document_id, terms) "
+                "VALUES (:chunk_id, :session_id, :document_id, array_to_tsvector(CAST(:terms AS text[])))"),
+            [{"chunk_id": r.id, "session_id": r.session_id, "document_id": r.document_id,
+              "terms": sorted(set(content_terms(r.text)))} for r in rows],
+        )
+        return
     db.execute(
         sql(f"INSERT INTO {TABLE}(scope, terms, chunk_id, document_id) VALUES (:scope, :terms, :chunk_id, :document_id)"),
         [{"scope": scope_token(r.session_id), "terms": index_text(r.text), "chunk_id": r.id, "document_id": r.document_id}
@@ -61,7 +89,10 @@ def delete_document(db: Session, document_id: str) -> None:
 
 
 def delete_session(db: Session, session_id: str) -> None:
-    db.execute(sql(f"DELETE FROM {TABLE} WHERE scope = :s"), {"s": scope_token(session_id)})
+    if _postgres(db):
+        db.execute(sql(f"DELETE FROM {TABLE} WHERE session_id = :s"), {"s": session_id})
+    else:
+        db.execute(sql(f"DELETE FROM {TABLE} WHERE scope = :s"), {"s": scope_token(session_id)})
 
 
 def query_terms(query: str) -> list[str]:
@@ -74,11 +105,23 @@ def match_expression(session_id: str, terms: list[str]) -> str:
     return f'scope : "{scope_token(session_id)}" AND terms : ({quoted})'
 
 
+def _tsquery(terms: list[str]) -> str:
+    """Terms as exact lexemes ('a' | 'b'): no text-search parser or stemmer touches them."""
+    return " | ".join("'" + t.replace("\\", "\\\\").replace("'", "''") + "'" for t in terms)
+
+
 def search(db: Session, session_id: str, query: str, k: int = 20) -> list[tuple[str, float]]:
-    """Best-matching chunk ids of the session with a score where higher is better (BM25, sign flipped)."""
+    """Best-matching chunk ids of the session with a score where higher is better."""
     terms = query_terms(query)
     if not terms:
         return []
+    if _postgres(db):
+        rows = db.execute(
+            sql(f"SELECT chunk_id, ts_rank(terms, q) AS score FROM {TABLE}, CAST(:q AS tsquery) AS q "
+                "WHERE session_id = :s AND terms @@ q ORDER BY score DESC, chunk_id LIMIT :k"),
+            {"q": _tsquery(terms), "s": session_id, "k": int(k)},
+        ).all()
+        return [(chunk_id, float(score)) for chunk_id, score in rows]
     rows = db.execute(
         sql(f"SELECT chunk_id, bm25({TABLE}, 0.0, 1.0, 0.0, 0.0) AS score FROM {TABLE} "
             f"WHERE {TABLE} MATCH :q ORDER BY score LIMIT :k"),

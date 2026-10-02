@@ -241,7 +241,7 @@ def test_an_old_messages_table_gets_the_citations_column_at_startup(tmp_path):
     code = ("from app.db import init_db, engine\nfrom sqlalchemy import text\ninit_db()\n"
             "with engine.connect() as c:\n print([r[1] for r in c.execute(text('PRAGMA table_info(messages)'))])\n"
             " print(c.execute(text('SELECT content, citations FROM messages')).all())\n")
-    env = {**os.environ, "DATA_DIR": str(data), "PYTHONPATH": str(__import__("pathlib").Path(__file__).parents[1])}
+    env = {**os.environ, "DATA_DIR": str(data), "DATABASE_URL": "", "PYTHONPATH": str(__import__("pathlib").Path(__file__).parents[1])}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path))
     assert out.returncode == 0, out.stderr[-800:]
     assert "citations" in out.stdout and "[('old message', None)]" in out.stdout

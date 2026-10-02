@@ -14,6 +14,7 @@ RUN grep -v -i '^pytest' requirements.txt > runtime-requirements.txt \
     && rm runtime-requirements.txt
 
 COPY app ./app
+COPY migrations ./migrations
 
 # Run as an unprivileged user that owns the data volume.
 RUN useradd --system --uid 10001 --home-dir /srv knavis \

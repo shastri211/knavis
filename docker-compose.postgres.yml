@@ -1,0 +1,29 @@
+# Optional overlay: run the application database on PostgreSQL instead of SQLite.
+#   POSTGRES_PASSWORD=choose-one docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+# Moving an existing SQLite install over: see DEPLOYMENT.md ("Moving to PostgreSQL").
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: knavis
+      POSTGRES_DB: knavis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - knavis-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knavis -d knavis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # Not published: only the backend reaches it.
+
+  backend:
+    environment:
+      DATABASE_URL: postgresql://knavis:${POSTGRES_PASSWORD}@db:5432/knavis
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  knavis-db:
