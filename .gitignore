@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+data/
+models/
+frontend/node_modules/
+frontend/dist/
+
+# virtual environments, logs, editor/tool folders
+.venv/
+venv/
+node_modules/
+*.log
+.vscode/
+.idea/
+.claude/
+CLAUDE.md
+
+# older prototype kept locally, not part of this repository
+multimodal_agentic_rag_from_scratch/
