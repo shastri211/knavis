@@ -9,6 +9,7 @@ A job can end *paused* instead of failed: ``awaiting_confirmation`` (a big plan 
 resuming never pays twice.
 """
 import asyncio
+import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -23,7 +24,7 @@ from .ingest.extract import extract_document
 from .ingest.store import (
     get_cached_extraction, materialize, put_cached_extraction, save_chunks, save_elements, sha256_file,
 )
-from .integration.pipeline import get_pipeline
+from .integration.pipeline import DenseUnavailable, get_pipeline
 from .reliability.governor import QuotaExhausted
 from .specialists.base import SpecialistUnavailable
 from .specialists.run import build_plan, execute_plan
@@ -33,6 +34,7 @@ from .specialists.vision import get_vision_provider
 _CACHEABLE = {"complete", "ocr_no_text", "audio_no_text"}
 _FIGURE_KINDS = {"pdf", "docx", "pptx"}
 _UNAVAILABLE = {"ocr_unavailable", "audio_unavailable"}
+logger = logging.getLogger("mragrag")
 
 
 def _reading_order(elements: list[Element]) -> list[Element]:
@@ -44,12 +46,19 @@ async def _persist(db: Session, doc: Document, elements: list[Element]):
     """Store elements and chunks and index the chunks; replaces what a previous stage stored."""
     pipeline = get_pipeline()
     old_ids = [row.id for row in db.query(DocChunk.id).filter(DocChunk.document_id == doc.id)]
-    pipeline.delete_chunk_points(doc.session_id, old_ids)
+    await pipeline.delete_chunk_points(doc.session_id, old_ids)
     materialized = materialize(elements, doc.id)
     stored = save_elements(db, doc, materialized)
     rows = save_chunks(db, doc, build_chunks(materialized))
     db.commit()
-    dense = await pipeline.index_chunks(doc.session_id, rows, doc.filename) if rows else None
+    dense = None
+    if rows:
+        try:
+            dense = await pipeline.index_chunks(doc.session_id, rows, doc.filename)
+        except DenseUnavailable as exc:
+            # The text is already saved and searchable by keyword; only the vectors are missing. Say so and carry on.
+            logger.warning("Document %s indexed without vectors: %s", doc.id, exc)
+            dense = {"error": str(exc), "hint": "Keyword search works; use Reindex once the vector store is reachable."}
     return stored, rows, dense
 
 
@@ -144,6 +153,8 @@ async def run_ingestion(job_id: str, mode: str = "auto"):
             _pause(db, job, doc, "waiting_for_quota", str(exc), resets_in=exc.resets_in if exc.resets_in != float("inf") else None)
     except Exception as exc:
         db.rollback()
+        if not isinstance(exc, ExtractionError):   # user-facing messages are sanitized, so the cause must be logged
+            logger.exception("Ingestion failed (job %s)", job_id)
         job = db.get(Job, job_id)
         if job:
             # ExtractionError messages are written for users; anything else is sanitized.

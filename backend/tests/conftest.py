@@ -15,10 +15,10 @@ os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="mrag_tests_")
 for _key in ("NVIDIA_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "ASSEMBLYAI_API_KEY",
              "QDRANT_URL", "QDRANT_API_KEY", "OPENROUTER_MODEL"):
     os.environ[_key] = ""
-os.environ["DEFAULT_PROVIDER"] = "nvidia"
-os.environ["DEFAULT_MODEL"] = "meta/llama-3.1-8b-instruct"
+os.environ["DEFAULT_PROVIDER"] = "groq"
+os.environ["DEFAULT_MODEL"] = "openai/gpt-oss-20b"
 
-MODEL = "meta/llama-3.1-8b-instruct"
+MODEL = "openai/gpt-oss-20b"
 FACT = "Company data must be retained for 90 days after the contract ends."
 OTHER_FACTS = "Backups are kept for 30 days. Audit logs are retained for 365 days. Deletion requests are answered within 14 days."
 
@@ -180,7 +180,7 @@ def upload(client):
 @pytest.fixture
 def ask(client):
     def _ask(session_id, question, **extra):
-        response = client.post("/api/chat", json={"session_id": session_id, "content": question, "provider": "nvidia", "model": MODEL, **extra})
+        response = client.post("/api/chat", json={"session_id": session_id, "content": question, "provider": "groq", "model": MODEL, **extra})
         assert response.status_code == 200, response.text
         return response.json()
     return _ask

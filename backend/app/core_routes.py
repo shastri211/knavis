@@ -35,7 +35,10 @@ def db():
 def health(): return {"status":"ok"}
 
 @router.get("/models", response_model=list[ModelOption])
-def get_models(): return models()
+def get_models():
+    # The server's configured default is flagged so the UI starts on it instead of a hard-coded provider.
+    default = resolve_selection()
+    return [{**m, "default": (m["provider"], m["id"]) == default} for m in models()]
 
 @router.post("/sessions", response_model=SessionOut)
 def create(p: SessionCreate, s: Session = Depends(db)):
@@ -179,6 +182,7 @@ async def upload(
 
 # What a person may do with a document that is waiting, and how the job should run afterwards.
 _PROCESS_ACTIONS = {
+    "indexed": {"reindex": "auto"},            # rebuild chunks and vectors (cached extraction and embeddings are reused)
     "awaiting_confirmation": {"confirm": "confirmed", "skip": "native_only"},
     "waiting_for_quota": {"retry": "confirmed", "skip": "native_only"},
     "ocr_unavailable": {"retry": "auto"},      # e.g. after adding an OCR key

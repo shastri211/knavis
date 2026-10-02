@@ -18,7 +18,7 @@ class SemanticRouter:
         if local:
             return local
         try:
-            r=await self.providers.chat(provider,model,[{"role":"system","content":ROUTER_SYSTEM},{"role":"user","content":text}],temperature=0,max_tokens=180,response_format={"type":"json_object"})
+            r=await self.providers.chat(provider,model,[{"role":"system","content":ROUTER_SYSTEM},{"role":"user","content":text}],temperature=0,max_tokens=800,response_format={"type":"json_object"})
         except Exception:
             # Uncertain requests must not become general-knowledge answers.
             return RouteDecision("RAG_QUERY", "rag", "unknown", 0, "provider routing unavailable")

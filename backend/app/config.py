@@ -9,10 +9,10 @@ class Settings(BaseSettings):
     # Relative DATA_DIR values resolve against the project root, never the process CWD,
     # so the database, uploads and renders always land in one place.
     data_dir:Path=BACKEND_DIR/'data'; nvidia_api_key:str=''; groq_api_key:str=''; openrouter_api_key:str=''; assemblyai_api_key:str=''
-    nvidia_base_url:str='https://integrate.api.nvidia.com/v1'; nvidia_ocr_base_url:str='https://ai.api.nvidia.com/v1/ocr'; groq_base_url:str='https://api.groq.com/openai/v1'; openrouter_base_url:str='https://openrouter.ai/api/v1'
+    nvidia_base_url:str='https://integrate.api.nvidia.com/v1'; nvidia_ocr_base_url:str='https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2'; groq_base_url:str='https://api.groq.com/openai/v1'; openrouter_base_url:str='https://openrouter.ai/api/v1'
     qdrant_url:str=''; qdrant_api_key:str=''; qdrant_collection:str=''; openrouter_model:str=''
-    embedding_model:str='nvidia/llama-nemotron-embed-1b-v2'; embedding_dimensions:int|None=None
-    default_provider:str='nvidia'; default_model:str='meta/llama-3.1-8b-instruct'; max_upload_mb:int=50; max_message_chars:int=20000; max_agent_retrieval_calls:int=2; top_k_rerank:int=12
+    embedding_model:str='nvidia/nemotron-3-embed-1b'; embedding_dimensions:int|None=None
+    default_provider:str='groq'; default_model:str='openai/gpt-oss-20b'; max_upload_mb:int=50; max_message_chars:int=20000; max_agent_retrieval_calls:int=2; top_k_rerank:int=12
     # Evidence gate. A chunk is usable when its dense cosine similarity reaches
     # evidence_min_dense OR it covers at least evidence_min_coverage of the question's
     # content terms. At most evidence_max_items chunks are sent to the LLM.

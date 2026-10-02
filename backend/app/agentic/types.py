@@ -21,6 +21,8 @@ class AgentPlan:
 class Claim:
     text: str
     evidence_ids: list[int] = field(default_factory=list)
+    attributed: bool = False   # the citation was found locally, not written by the model
+    raw: str = ""              # the exact text in the answer (for cutting an unsupported sentence out)
 
 @dataclass
 class VerificationResult:
@@ -28,3 +30,5 @@ class VerificationResult:
     claims: list[Claim]
     unsupported_claims: list[str]
     conflicts: list[str]
+    rejected: list[Claim] = field(default_factory=list)
+    checked: int = 0           # how many sentences needed support (headings and courtesy lines do not)

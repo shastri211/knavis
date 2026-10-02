@@ -4,7 +4,7 @@ import "./style.css";
 
 const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api";
 
-type Model = {id:string;provider:string;name:string;category:string;modalities:string[];languages:string;status:string;selectable:boolean};
+type Model = {id:string;provider:string;name:string;category:string;modalities:string[];languages:string;status:string;selectable:boolean;default?:boolean};
 
 function App(){
   const [models,setModels]=useState<Model[]>([]);
@@ -26,6 +26,7 @@ function App(){
       fetch(API+"/sessions").then(r=>r.json())
     ]).then(([m,s])=>{
       setModels(m); setSessions(s);
+      const server=m.find((x:Model)=>x.default); if(server){setProvider(server.provider); setModel(server.id);}
       if(s.length) selectSession(s[0]);
     });
   },[]);

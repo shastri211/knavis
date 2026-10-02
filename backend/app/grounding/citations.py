@@ -1,7 +1,8 @@
 import re
 
-# Matches [EVIDENCE 1], [EVIDENCE 1 | file, page 2], [EVIDENCE 1, EVIDENCE 3], [evidence 2].
-_MARKER_RE = re.compile(r"\[\s*EVIDENCE\s+([^\]|]*?)(?:\|[^\]]*)?\]", re.IGNORECASE)
+# Matches [EVIDENCE 1], [EVIDENCE 1 | file, page 2], [EVIDENCE 1, EVIDENCE 3], [evidence 2], and the fullwidth
+# 【EVIDENCE 1】 and (EVIDENCE 1) forms that some models (e.g. gpt-oss) write instead of square brackets.
+_MARKER_RE = re.compile(r"[\[【(]\s*EVIDENCE\s+([^\]】)|]*?)(?:\|[^\]】)]*)?[\]】)]", re.IGNORECASE)
 _DIGITS_RE = re.compile(r"\d+")
 
 # Kept for callers that import the old name.

@@ -19,8 +19,11 @@ class GuardrailsAgent:
         "disable the safety",
     )
 
-    def __init__(self, router):
+    def __init__(self, router, has_documents=None):
         self.router = router
+        # has_documents(session_id) -> bool. With documents available, free chat must not answer questions
+        # from the model's general knowledge: those go to grounded retrieval (which can abstain).
+        self.has_documents = has_documents
 
     async def inspect(self, request: AgentRequest, decision=None) -> AgentDecision:
         text = request.text.lower().strip()
@@ -55,6 +58,16 @@ class GuardrailsAgent:
                 reason="Utility request is allowed.",
                 language=decision.language,
                 intent=decision.intent,
+            )
+
+        if (decision.route == "conversation" and decision.intent == "NORMAL_CONVERSATION"
+                and self.has_documents and self.has_documents(request.session_id)):
+            return AgentDecision(
+                allowed=True,
+                route="rag",
+                reason="The session has documents, so this is answered from them (or not at all).",
+                language=decision.language,
+                intent="RAG_QUERY",
             )
 
         if decision.route == "conversation":

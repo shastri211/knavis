@@ -1,7 +1,9 @@
 from .planner import BoundedPlanner
 from .decomposer import decompose_query
 from .query_rewrite import rewrite_query
-from .verification import verify_answer
+from .verification import trim_unsupported, verify_answer
+from ..grounding.citations import source_citations
+from ..retrieval.text import is_overview_query
 
 ABSTENTION = "I don't have enough reliable evidence in the provided material to answer that accurately, so I won't guess."
 
@@ -19,7 +21,8 @@ class AgentRunner:
 
     async def run(self, session_id, query, provider, model, language=None):
         plan = self.planner.plan(query)
-        queries = decompose_query(query, plan.max_subqueries)
+        # "Summarize A and B" is one request, not two sub-questions.
+        queries = [query] if is_overview_query(query) else decompose_query(query, plan.max_subqueries)
 
         all_evidence = []
         calls = 0
@@ -51,7 +54,7 @@ class AgentRunner:
             }
 
         result = await self.answer_service.answer(
-            query, evidence, provider, model, language
+            query, evidence, provider, model, language, allow_uncited=True
         )
         # The model cited the gate-selected evidence, so verify against that exact list.
         cited_evidence = result.pop("evidence", evidence)
@@ -61,6 +64,16 @@ class AgentRunner:
             return {**result, "agent": {"retrieval_calls": calls, "status": "abstained", "usage": usage}}
 
         verification = verify_answer(result["answer"], cited_evidence)
+        status = "verified"
+        if not verification.supported:
+            trimmed = trim_unsupported(result["answer"], verification)
+            if trimmed is not None:
+                # A small minority of sentences is not supported by the documents: leave them out and say so.
+                dropped = len(verification.rejected)
+                result = {**result, "answer": f"{trimmed}\n\n(Note: {dropped} statement{'s' if dropped > 1 else ''} could not be "
+                                              "verified against the documents and left out.)"}
+                verification = verify_answer(trimmed, cited_evidence)
+                status = "trimmed"
         if not verification.supported:
             return {
                 "answer": "I found retrieved material, but I could not verify the generated answer against it reliably, so I won't guess.",
@@ -75,12 +88,18 @@ class AgentRunner:
                 },
             }
 
+        attributed = sum(c.attributed for c in verification.claims)
+        if attributed or not result.get("citations"):
+            # The model wrote no (or incomplete) citations: use the sources verification found for each sentence.
+            ids = sorted({i for c in verification.claims for i in c.evidence_ids if 1 <= i <= len(cited_evidence)})
+            result = {**result, "citations": source_citations(cited_evidence, ids)}
         return {
             **result,
             "agent": {
                 "retrieval_calls": calls,
-                "status": "verified",
+                "status": status,
                 "claims": len(verification.claims),
+                "attributed_claims": attributed,
                 "conflicts": verification.conflicts,
                 "usage": usage,
             },

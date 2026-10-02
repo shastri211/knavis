@@ -75,10 +75,46 @@ def test_fabricated_number_is_rejected(llm, session_id, upload, ask):
     assert result["citations"] == []
 
 
-def test_uncited_answer_is_rejected(llm, session_id, upload, ask):
+def test_an_answer_without_citation_markers_is_accepted_when_the_evidence_supports_it(llm, session_id, upload, ask):
+    """Found in a live run: a perfect answer was discarded because the model wrote no [EVIDENCE n] markers."""
     upload(session_id, "policy.txt", make_txt(), "text/plain")
-    llm.answer = "Company data must be retained for 90 days."
-    assert ABSTAIN in ask(session_id, QUESTION)["message"]["content"]
+    llm.answer = "Company data must be retained for 90 days after the contract ends."
+    result = ask(session_id, QUESTION)
+    assert result["message"]["content"] == llm.answer
+    assert result["citations"] and result["citations"][0]["source"] == "policy.txt"      # attributed locally, no extra model call
+    assert llm.calls == ["router", "answer"]
+
+
+def test_an_answer_without_markers_is_still_rejected_when_it_is_not_in_the_evidence(llm, session_id, upload, ask):
+    upload(session_id, "policy.txt", make_txt(), "text/plain")
+    llm.answer = "Company data must be retained for 7 years under European law."
+    assert UNVERIFIED in ask(session_id, QUESTION)["message"]["content"]
+    llm.answer = "The retention period is mandated by European law and enforced by regulators."
+    assert UNVERIFIED in ask(session_id, QUESTION)["message"]["content"] or ABSTAIN in ask(session_id, QUESTION)["message"]["content"]
+
+
+def test_one_citation_at_the_end_of_a_paragraph_covers_the_paragraph(llm, session_id, upload, ask):
+    upload(session_id, "policy.txt", make_txt(), "text/plain")
+    llm.answer = ("The policy covers retention. Company data must be retained for 90 days after the contract ends. "
+                  "Backups are kept for 30 days. [EVIDENCE 1]")
+    assert ask(session_id, QUESTION)["message"]["content"] == llm.answer
+
+
+def test_with_documents_in_the_session_open_questions_are_grounded_not_answered_from_general_knowledge(llm, session_id, upload, ask):
+    """Found in a live run: 'Why do we need Git?' was answered by the free-chat model although a Git document was uploaded."""
+    upload(session_id, "policy.txt", make_txt(), "text/plain")
+    llm.router = {"intent": "NORMAL_CONVERSATION", "route": "conversation"}
+    llm.answer = "I could not find that in the documents."
+    result = ask(session_id, "Why do we need Git?")
+    assert result["route"] == "rag" and "conversation" not in llm.calls
+
+
+def test_a_summary_request_that_names_a_document_summarises_that_document(llm, session_id, upload, ask):
+    upload(session_id, "alpha_report.txt", b"Alpha report. The alpha project launched in March with 12 engineers.", "text/plain")
+    upload(session_id, "beta_budget.txt", b"Beta budget. The beta budget was approved at 40000 rupees.", "text/plain")
+    llm.answer = "The alpha project launched in March [EVIDENCE 1]."
+    ask(session_id, "Summarize the alpha report.")
+    assert "alpha project launched" in llm.answer_prompt and "beta budget" not in llm.answer_prompt
 
 
 def test_invented_uncited_extra_claim_is_rejected(llm, session_id, upload, ask):
@@ -156,5 +192,11 @@ def test_stale_default_model_falls_back_to_a_catalog_model(client, llm, session_
 
 
 def test_explicit_unknown_model_is_a_400(client, session_id):
-    response = client.post("/api/chat", json={"session_id": session_id, "content": "hello", "provider": "nvidia", "model": "bogus"})
+    response = client.post("/api/chat", json={"session_id": session_id, "content": "hello", "provider": "groq", "model": "bogus"})
     assert response.status_code == 400
+
+
+def test_the_models_endpoint_flags_the_servers_default_for_the_ui(client):
+    models = client.get("/api/models").json()
+    defaults = [m for m in models if m["default"]]
+    assert len(defaults) == 1 and defaults[0]["provider"] == "groq" and defaults[0]["id"] == "openai/gpt-oss-20b"

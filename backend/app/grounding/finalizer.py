@@ -5,11 +5,14 @@ ABSTENTION = (
     "that accurately, so I won't guess."
 )
 
-def finalize_answer(answer: str, evidence: list[dict], require_citations=True):
+def finalize_answer(answer: str, evidence: list[dict], require_citations=True, allow_uncited=False):
     if not answer or not answer.strip():
         return ABSTENTION, [], False
 
     ok, refs = validate_citations(answer, evidence)
+    if not refs and allow_uncited:
+        # No markers at all: the caller verifies each sentence against the evidence and attributes its source.
+        return answer.strip(), [], True
     if require_citations and not ok:
         return ABSTENTION, [], False
 

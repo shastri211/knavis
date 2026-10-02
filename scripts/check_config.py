@@ -107,7 +107,32 @@ if "--online" in sys.argv:
                         warnings.append(f"NVIDIA does not list {m['id']}")
 else:
     print()
-    print("(Run with --online to check model ids against the providers' catalogs.)")
+    print("(Run with --online to list model ids; --probe to really call each catalog model once.)")
+
+# A provider's /models list proves little (NVIDIA lists models that 404 when invoked), so --probe makes one
+# tiny real chat call per catalog model. It costs a few tokens of free-tier quota per model.
+if "--probe" in sys.argv:
+    import asyncio
+    from app import providers as provider_module
+
+    async def probe(item):
+        try:
+            reply = await provider_module.chat(item["provider"], item["id"], [{"role": "user", "content": "Reply with the single word OK."}],
+                                               max_tokens=200, temperature=0)
+            return f"ok ({reply.text.strip()[:20]!r})"
+        except Exception as exc:
+            return f"FAILED: {type(exc).__name__}: {str(exc)[:80]}"
+
+    print()
+    print("Calling each catalog model once...")
+    keys = {"nvidia": settings.nvidia_api_key, "groq": settings.groq_api_key, "openrouter": settings.openrouter_api_key}
+    for item in models():
+        if not keys.get(item["provider"]):
+            continue
+        result = asyncio.run(probe(item))
+        print(f"  {item['provider']:10} {item['id']:42} {result}")
+        if result.startswith("FAILED"):
+            warnings.append(f"{item['provider']}/{item['id']} did not answer a chat call; remove it from the catalog or fix the account")
 
 print()
 if warnings:

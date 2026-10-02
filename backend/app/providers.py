@@ -16,14 +16,16 @@ class Response:
     usage: dict | None = None
 
 
-# Entries are limited to model IDs verified against provider documentation.
-# Pricing and account availability are provider-specific and are never inferred.
+# Entries are models that answered a real chat call on 2026-10-02 (`python scripts/check_config.py --probe`).
+# A provider's /models list is NOT enough: NVIDIA lists models that return 404 when invoked, and providers
+# retire models without notice (the earlier Llama entries disappeared). Re-run the probe; availability is never inferred.
 CATALOG = [
-    {"id": "meta/llama-3.1-8b-instruct", "provider": "nvidia", "name": "Llama 3.1 8B Instruct", "category": "general", "modalities": ["text"], "languages": "provider-dependent", "status": "verify availability", "selectable": True},
+    {"id": "nvidia/nemotron-3-super-120b-a12b", "provider": "nvidia", "name": "Nemotron 3 Super 120B", "category": "reasoning", "modalities": ["text"], "languages": "provider-dependent", "status": "invocation verified", "selectable": True},
+    {"id": "openai/gpt-oss-20b", "provider": "nvidia", "name": "GPT OSS 20B (NVIDIA)", "category": "reasoning", "modalities": ["text"], "languages": "provider-dependent", "status": "invocation verified", "selectable": True},
+    {"id": "meta/llama-3.2-11b-vision-instruct", "provider": "nvidia", "name": "Llama 3.2 11B Vision", "category": "general", "modalities": ["text", "image"], "languages": "provider-dependent", "status": "invocation verified", "selectable": True},
     {"id": "openai/gpt-oss-20b", "provider": "groq", "name": "GPT OSS 20B", "category": "reasoning", "modalities": ["text"], "languages": "provider-dependent", "status": "provider catalog", "selectable": True},
     {"id": "openai/gpt-oss-120b", "provider": "groq", "name": "GPT OSS 120B", "category": "reasoning", "modalities": ["text"], "languages": "provider-dependent", "status": "provider catalog", "selectable": True},
-    {"id": "llama-3.3-70b-versatile", "provider": "groq", "name": "Llama 3.3 70B Versatile", "category": "general", "modalities": ["text"], "languages": "provider-dependent", "status": "provider catalog", "selectable": True},
-    {"id": "llama-3.1-8b-instant", "provider": "groq", "name": "Llama 3.1 8B Instant", "category": "fast/general", "modalities": ["text"], "languages": "provider-dependent", "status": "provider catalog", "selectable": True},
+    {"id": "qwen/qwen3.8-27b", "provider": "groq", "name": "Qwen 3.8 27B", "category": "general", "modalities": ["text", "image"], "languages": "provider-dependent", "status": "provider catalog", "selectable": True},
 ]
 
 
@@ -85,6 +87,9 @@ async def chat(provider, model, messages, **kwargs):
     base = {"nvidia": settings.nvidia_base_url, "groq": settings.groq_base_url,
             "openrouter": settings.openrouter_base_url}[provider]
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+    if provider == "groq" and model.startswith("openai/gpt-oss") and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = "low"   # reasoning tokens count against max_tokens and can truncate the answer
 
     async def call():
         async with httpx.AsyncClient(timeout=120) as client:

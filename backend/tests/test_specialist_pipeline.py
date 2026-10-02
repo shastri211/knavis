@@ -310,6 +310,6 @@ def test_a_spent_free_tier_limit_gets_a_clear_chat_reply(client, upload, monkeyp
     monkeypatch.setattr("app.provider_service.raw_chat", exhausted)
     session = new_session(client)
     upload(session, "policy.txt", FACT.encode(), "text/plain")
-    response = client.post("/api/chat", json={"session_id": session, "content": QUESTION, "provider": "nvidia", "model": MODEL}).json()
+    response = client.post("/api/chat", json={"session_id": session, "content": QUESTION, "provider": "groq", "model": MODEL}).json()
     assert response["route"] == "blocked" and "free-tier limit" in response["message"]["content"] and "1.5 h" in response["message"]["content"]
     assert response["message"]["intent"] == "QUOTA_EXHAUSTED"
