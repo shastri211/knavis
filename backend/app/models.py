@@ -26,6 +26,8 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(30), default='queued')
     progress: Mapped[int] = mapped_column(Integer, default=0)
     stage: Mapped[str] = mapped_column(String(80), default='queued')
+    mode: Mapped[str|None] = mapped_column(String(20), nullable=True)        # auto | confirmed | native_only
+    attempts: Mapped[int|None] = mapped_column(Integer, nullable=True)       # times the job was started
     error: Mapped[str|None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

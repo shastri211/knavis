@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .db import init_db
 from .ingest.store import migrate_legacy_documents
+from .job_runner import recover_unfinished_jobs
 from .reliability.logging import configure, request_id
 from .core_routes import router as core_router
 from .auth import router as auth_router
@@ -54,10 +55,11 @@ async def add_request_id(request, call_next):
     return response
 
 @app.on_event("startup")
-def startup():
+async def startup():
     configure()
     init_db()
     migrate_legacy_documents()   # older databases: build chunks from stored evidence once
+    await recover_unfinished_jobs()   # a restart in the middle of an upload resumes it instead of leaving it queued forever
 
 @app.get("/")
 def root():

@@ -70,14 +70,17 @@ def _pause(db: Session, job: Job, doc: Document, state: str, message: str, **ext
     db.commit()
 
 
-async def run_ingestion(job_id: str, mode: str = "auto"):
-    """``mode``: ``auto`` (ask before big jobs), ``confirmed`` (spend what the plan needs), ``native_only`` (skip hosted work)."""
+async def run_ingestion(job_id: str, mode: str | None = None):
+    """``mode``: ``auto`` (ask before big jobs), ``confirmed`` (spend what the plan needs), ``native_only`` (skip hosted work).
+    Without one, the mode stored on the job is used, which is how a job resumed after a restart keeps the person's decision."""
     db: Session = SessionLocal()
     try:
         job = db.get(Job, job_id)
         if not job:
             return
+        mode = mode or job.mode or "auto"
         job.status, job.progress, job.stage, job.error = "running", 10, "extracting", None
+        job.mode, job.attempts = mode, (job.attempts or 0) + 1
         db.commit()
         doc = db.get(Document, job.document_id)
         if not doc:
