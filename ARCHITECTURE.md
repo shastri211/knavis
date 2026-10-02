@@ -1,6 +1,6 @@
 # Architecture
 
-Frontend -> FastAPI -> safety -> language/semantic conversation -> bounded agent -> modality processing -> dense+BM25 -> RRF -> rerank -> evidence gate -> selected user LLM -> citation validation -> output safety.
+Frontend -> FastAPI -> safety -> language/semantic conversation -> bounded agent -> modality processing -> dense + SQLite FTS5 keyword search -> RRF (spreadsheet computations: text-to-SQL over per-session tables) -> rerank -> evidence gate -> selected user LLM -> citation validation -> output safety.
 
 NVIDIA, Groq and OpenRouter are interchangeable generation providers. AssemblyAI is production ASR. OCR/vision/embeddings/reranking are specialist tasks, not user-selected arbitrary LLM calls.
 

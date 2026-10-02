@@ -16,6 +16,7 @@ from .config import settings
 from .agents.semantic_router import SemanticRouter, utility_answer, CONVERSATION_RESPONSES
 from .guardrails import validate_message, validate_upload, GuardrailError
 from .jobs import run_ingestion
+from .cleanup import delete_document as remove_document, delete_session as remove_session
 from .reliability.governor import QuotaExhausted
 from .agent_graph.graph import invoke_agent_graph
 from .integration.pipeline import get_pipeline
@@ -62,7 +63,14 @@ def delete_session(sid: str, s: Session = Depends(db)):
     session = s.get(ChatSession, sid)
     if not session:
         raise HTTPException(404, "Session not found")
-    s.delete(session); s.commit()
+    remove_session(s, session, pipeline)
+
+@router.delete("/documents/{doc_id}", status_code=204)
+def delete_document(doc_id: str, s: Session = Depends(db)):
+    doc = s.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    remove_document(s, doc, pipeline)
 
 @router.get("/sessions/{sid}/messages", response_model=list[MessageOut])
 def messages(sid, s: Session = Depends(db)):
@@ -118,7 +126,8 @@ async def chat_route(p: MessageCreate, s: Session = Depends(db)):
     assistant = Message(
         session_id=session.id, role="assistant", content=text,
         language=result.get("language"),
-        intent=intent, provider=provider, model=model
+        intent=intent, provider=provider, model=model,
+        citations=result.get("citations") or None,   # kept so the sources are still there when the chat is reopened
     )
     s.add(assistant); s.flush()
     if usage:

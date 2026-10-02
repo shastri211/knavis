@@ -31,6 +31,10 @@ class FakeLLM:
         self.answer = f"{FACT} [EVIDENCE 1]"
         self.router = {"intent": "RAG_QUERY", "route": "rag"}
         self.answer_prompt = ""
+        self.sql = None               # what the SQL writer returns for an analytical question
+        self.sql_label = "Result"
+        self.sql_raw = None           # a raw reply that replaces the JSON one (for malformed output)
+        self.sql_prompt = ""
 
     async def chat(self, provider, model, messages, **kwargs):
         from app.providers import Response
@@ -38,6 +42,10 @@ class FakeLLM:
         if "semantic router" in system:
             self.calls.append("router")
             text = json.dumps({**self.router, "language": "English", "confidence": 0.9, "reason": "test"})
+        elif "SQL query-writing component" in system:
+            self.calls.append("sql")
+            self.sql_prompt = messages[-1]["content"]
+            text = self.sql_raw if self.sql_raw is not None else json.dumps({"sql": self.sql, "label": self.sql_label})
         elif "answer-generation component" in system:
             self.calls.append("answer")
             self.answer_prompt = messages[-1]["content"]
@@ -145,6 +153,30 @@ def make_eml():
 
 def make_yaml():
     return f"policy:\n  retention: {FACT}\n  backups: Backups are kept for 30 days.\n".encode()
+
+CAMPAIGN_ROWS = (
+    # (channel, converted) per campaign row: Email converts 7 of 12, Search 5 of 8, Social 3 of 10
+    [("Email", 1)] * 7 + [("Email", 0)] * 5 + [("Search", 1)] * 5 + [("Search", 0)] * 3 + [("Social", 1)] * 3 + [("Social", 0)] * 7
+)
+
+def make_campaign_xlsx(title="Week1", notes=False):
+    """A marketing sheet in the style of Campaign_Data_Week1_new.xlsx: Converted is a 1/0 flag per row."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = title
+    if notes:
+        ws.append(["Weekly campaign export"])
+        ws.append([])
+    ws.append(["Campaign_ID", "Channel", "Impressions", "Cost", "Converted"])
+    for i, (channel, converted) in enumerate(CAMPAIGN_ROWS, 1):
+        ws.append([f"C{i:03d}", channel, 1000 + i * 10, round(10.5 + i, 2), converted])
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+CAMPAIGN_FILE = "Campaign_Data_Week1_new.xlsx"
+CAMPAIGN_TABLE = "campaign_data_week1_new"
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 SAMPLES = {
     "txt": ("policy.txt", make_txt, "text/plain"),

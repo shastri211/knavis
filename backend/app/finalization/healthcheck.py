@@ -7,7 +7,6 @@ REQUIRED_MODULES = [
     "httpx",
     "fitz",
     "qdrant_client",
-    "rank_bm25",
 ]
 
 def dependency_report():

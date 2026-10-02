@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
 from ..config import settings
-from ..retrieval.bm25 import BM25Index
+from ..retrieval import fts
 from ..retrieval.embeddings import NVIDIAEmbeddingClient
-from ..retrieval.qdrant_store import QdrantStore
+from ..retrieval.qdrant_store import QdrantStore, session_filter
 from ..retrieval.rrf import reciprocal_rank_fusion
 from pathlib import Path
 
@@ -50,7 +50,7 @@ class IntegratedRAGPipeline:
 
         self._dense_down_until = 0.0
         self._dense_last_error = ""
-        self.bm25 = BM25Index()
+        self._migrated_sessions: set[str] = set()   # sessions whose old per-session collection was already folded in
         self.providers = ProviderService()
         self.answerer = GroundedAnswerService(self.providers)
 
@@ -63,15 +63,26 @@ class IntegratedRAGPipeline:
         logger.warning("Vector search unavailable (%s: %s); using keyword search for %ss",
                        type(exc).__name__, str(exc)[:120], DENSE_RETRY_SECONDS)
 
-    def collection(self, session_id: str) -> str:
-        """
-        Return a safe, session-scoped Qdrant collection name.
+    @property
+    def collection_name(self) -> str:
+        """The one collection every session shares; a payload filter on ``session_id`` keeps sessions apart."""
+        return settings.qdrant_collection or "knavis_chunks"
 
-        Each chat session gets its own collection so documents from
-        unrelated sessions cannot leak into retrieval.
-        """
+    @staticmethod
+    def legacy_collection(session_id: str) -> str:
+        """The per-session collection used before sessions shared one (kept only to migrate it)."""
         safe = "".join(c if c.isalnum() else "_" for c in session_id)
         return f"session_{safe}"
+
+    def _fold_in_legacy(self, session_id: str) -> None:
+        """Move a session's vectors from its old collection into the shared one (once per process, then no-op)."""
+        if session_id in self._migrated_sessions:
+            return
+        moved = self.qdrant.move_legacy_collection(
+            self.legacy_collection(session_id), self.collection_name, session_id, settings.embedding_dimensions)
+        if moved > 0:
+            logger.info("Moved %s vectors of session %s into %s", moved, session_id, self.collection_name)
+        self._migrated_sessions.add(session_id)
 
     async def index_chunks(self, session_id, rows, source_name):
         """Embed stored chunks (reusing cached vectors) and upsert them into Qdrant.
@@ -84,11 +95,12 @@ class IntegratedRAGPipeline:
         if not self.dense_ready():
             raise DenseUnavailable(self._dense_last_error or "the vector store was unreachable a moment ago")
 
-        collection = self.collection(session_id)
+        collection = self.collection_name
         try:
             # Reach the vector store first: if it is down, no embedding quota is spent on vectors that cannot be
-            # stored. This also creates the session collection or validates the dimension of an existing one.
+            # stored. This also creates the shared collection or validates the dimension of an existing one.
             await asyncio.to_thread(self.qdrant.ensure_collection, collection, settings.embedding_dimensions)
+            await asyncio.to_thread(self._fold_in_legacy, session_id)
 
             with SessionLocal() as db:
                 vectors, stats = await embed_with_cache(db, self.embedding, [r.text for r in rows], "passage")
@@ -108,6 +120,7 @@ class IntegratedRAGPipeline:
                     **(row.metadata_json or {}),
                     "text": row.text, "source": source_name, "page": row.page, "locator": row.locator,
                     "section": row.section, "kind": row.kind, "document_id": row.document_id, "chunk_id": row.id,
+                    "session_id": session_id,
                 }
                 for row in rows
             ]
@@ -126,17 +139,18 @@ class IntegratedRAGPipeline:
         if self.dense_ready() and chunk_ids:
             try:
                 await asyncio.to_thread(
-                    self.qdrant.delete, self.collection(session_id),
+                    self.qdrant.delete, self.collection_name,
                     [str(uuid5(NAMESPACE_URL, f"{session_id}:{cid}")) for cid in chunk_ids])
             except Exception as exc:   # stale vectors are harmless; never fail an ingestion over them
                 self.dense_failed(exc)
 
     async def dense_search(self, session_id, query, k=20):
-        """Dense semantic retrieval from the session-specific Qdrant collection."""
+        """Dense semantic retrieval, restricted to the session's own vectors."""
         if not self.qdrant:
             return []
 
-        collection = self.collection(session_id)
+        collection = self.collection_name
+        await asyncio.to_thread(self._fold_in_legacy, session_id)   # may create the shared collection from an old one
 
         # Avoid querying a collection that has not been created yet.
         if not await asyncio.to_thread(self.qdrant.client.collection_exists, collection):
@@ -154,7 +168,9 @@ class IntegratedRAGPipeline:
                 f"but EMBEDDING_DIMENSIONS is configured as {settings.embedding_dimensions}."
             )
 
-        hits = await asyncio.to_thread(self.qdrant.search, collection, vectors[0], k=k)
+        hits = await asyncio.to_thread(self.qdrant.search, collection, vectors[0], k=k, query_filter=session_filter(session_id))
+        # The filter is the isolation boundary; checking the payload as well means a bug there cannot leak another session.
+        hits = [h for h in hits if h["payload"].get("session_id") == session_id]
         return [
             {
                 "id": h["payload"].get("chunk_id", h["id"]),
@@ -227,22 +243,47 @@ class IntegratedRAGPipeline:
             for rank, c in enumerate(picked[:k])
         ]
 
+    def sparse_search(self, session_id, query, k=20):
+        """Keyword retrieval from the persistent SQLite FTS5 index (BM25 ranking), best match first."""
+        with SessionLocal() as db:
+            ranked = fts.search(db, session_id, query, k)
+            if not ranked:
+                return []
+            by_id = {
+                chunk.id: (chunk, document)
+                for chunk, document in db.query(DocChunk, Document)
+                .join(Document, DocChunk.document_id == Document.id)
+                .filter(DocChunk.id.in_([chunk_id for chunk_id, _ in ranked]), Document.status != "failed")
+            }
+            results = []
+            for chunk_id, score in ranked:
+                if chunk_id not in by_id or not by_id[chunk_id][0].text.strip():
+                    continue
+                chunk, document = by_id[chunk_id]
+                results.append({
+                    "id": chunk.id, "text": chunk.text,
+                    "metadata": {
+                        **(chunk.metadata_json or {}),
+                        "document_id": document.id, "source": document.filename, "page": chunk.page,
+                        "locator": chunk.locator, "section": chunk.section, "kind": chunk.kind, "chunk_id": chunk.id,
+                    },
+                    "score": score, "bm25_score": score, "rank": len(results),
+                })
+            return results
+
     async def retrieve(self, session_id, query, k=20):
         """
         Hybrid retrieval.
 
-        SQLite holds the chunks (lexical source of truth); Qdrant provides dense retrieval
+        SQLite holds the chunks and their FTS5 keyword index; Qdrant provides dense retrieval
         when configured and indexed. Results are combined with reciprocal rank fusion.
         """
-        docs = self._load_chunks(session_id)
-
         # "Summarize this document" has no content terms to match, so similarity search
         # would return noise. Sample the documents themselves, in reading order.
         if is_overview_query(query):
-            return self._overview_sample(docs, k, query)
+            return self._overview_sample(self._load_chunks(session_id), k, query)
 
-        self.bm25.build(docs)
-        sparse = self.bm25.search(query, k)
+        sparse = await asyncio.to_thread(self.sparse_search, session_id, query, k)
 
         dense = []
         # Dense retrieval is optional: if the vector store or the embedding quota is unavailable the question
@@ -256,6 +297,27 @@ class IntegratedRAGPipeline:
                 self.dense_failed(exc)
 
         return reciprocal_rank_fusion([dense, sparse], limit=k)
+
+    def purge_session_vectors(self, session_id) -> None:
+        """Delete every vector of a session, from the shared collection and from an unmigrated old one. Best effort."""
+        if not self.qdrant:
+            return
+        try:
+            self.qdrant.delete_session(self.collection_name, session_id)
+            legacy = self.legacy_collection(session_id)
+            if self.qdrant.client.collection_exists(legacy):
+                self.qdrant.client.delete_collection(legacy)
+        except Exception as exc:   # the rows are gone either way; orphaned vectors can never be retrieved (session ids are unique)
+            logger.warning("Could not delete the vectors of session %s: %s: %s", session_id, type(exc).__name__, str(exc)[:120])
+        self._migrated_sessions.discard(session_id)
+
+    def purge_document_vectors(self, document_id) -> None:
+        if not self.qdrant:
+            return
+        try:
+            self.qdrant.delete_document(self.collection_name, document_id)
+        except Exception as exc:
+            logger.warning("Could not delete the vectors of document %s: %s: %s", document_id, type(exc).__name__, str(exc)[:120])
 
     async def answer(self, session_id, query, provider, model, language=None):
         """

@@ -37,9 +37,11 @@ class GuardrailsAgent:
                 intent="PROMPT_INJECTION",
             )
 
-        # Semantic routing remains the source of truth for scope.
+        # With documents in the session the router needs no model call: anything that is not a greeting or a
+        # utility is a document question. Without documents it may still ask the model.
+        has_documents = bool(self.has_documents and self.has_documents(request.session_id))
         decision = decision or await self.router.classify(
-            request.text, request.provider, request.model
+            request.text, request.provider, request.model, has_documents=has_documents
         )
 
         if decision.route == "out_of_scope":
@@ -60,8 +62,7 @@ class GuardrailsAgent:
                 intent=decision.intent,
             )
 
-        if (decision.route == "conversation" and decision.intent == "NORMAL_CONVERSATION"
-                and self.has_documents and self.has_documents(request.session_id)):
+        if decision.route == "conversation" and decision.intent == "NORMAL_CONVERSATION" and has_documents:
             return AgentDecision(
                 allowed=True,
                 route="rag",
