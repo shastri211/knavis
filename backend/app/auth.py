@@ -140,11 +140,23 @@ class DeleteAccount(BaseModel):
     password: str
 
 
-def _normalise_email(email: str) -> str:
+class ChangePassword(BaseModel):
+    current_password: str
+    new_password: str
+
+
+def normalise_email(email: str) -> str:
     email = (email or "").strip().lower()
     if len(email) > 254 or not _EMAIL_RE.match(email):
         raise HTTPException(400, "Enter a valid email address.")
     return email
+
+
+def check_new_password(password: str, email: str) -> None:
+    if not MIN_PASSWORD <= len(password or "") <= MAX_PASSWORD:
+        raise HTTPException(400, f"Use a password of {MIN_PASSWORD} to {MAX_PASSWORD} characters.")
+    if password.lower() == email:
+        raise HTTPException(400, "The password must not be your email address.")
 
 
 def _session_out(db: Session, user: User) -> dict:
@@ -164,11 +176,8 @@ def register(body: Credentials, request: Request, db: Session = Depends(get_db))
     if not settings.allow_registration:
         raise HTTPException(403, "Registration is closed on this server.")
     enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
-    email = _normalise_email(body.email)
-    if not MIN_PASSWORD <= len(body.password) <= MAX_PASSWORD:
-        raise HTTPException(400, f"Use a password of {MIN_PASSWORD} to {MAX_PASSWORD} characters.")
-    if body.password.lower() == email:
-        raise HTTPException(400, "The password must not be your email address.")
+    email = normalise_email(body.email)
+    check_new_password(body.password, email)
     if db.query(User.id).filter(User.email == email).first():
         raise HTTPException(409, "An account with this email already exists.")
     first = db.query(User.id).first() is None
@@ -218,6 +227,11 @@ def delete_account(body: DeleteAccount, db: Session = Depends(get_db), principal
     user = db.get(User, principal.user_id)
     if not user or not verify_password(body.password or "", user.password_hash):
         raise HTTPException(403, "Incorrect password.")
+    delete_user(db, user)
+
+
+def delete_user(db: Session, user: User) -> None:
+    """Delete an account and everything it owns: chats, documents, vectors, tables, files, sign-ins."""
     from .cleanup import delete_session
     from .integration.pipeline import get_pipeline
     for session in db.query(ChatSession).filter(ChatSession.user_id == user.id).all():
@@ -225,3 +239,29 @@ def delete_account(body: DeleteAccount, db: Session = Depends(get_db), principal
     db.query(AuthToken).filter(AuthToken.user_id == user.id).delete()
     db.delete(user)
     db.commit()
+
+
+def set_password(db: Session, user: User, new_password: str, keep_token_id: str | None = None) -> int:
+    """Store a new password and end every sign-in of the account (except ``keep_token_id``). Returns how many."""
+    user.password_hash = hash_password(new_password)
+    query = db.query(AuthToken).filter(AuthToken.user_id == user.id)
+    if keep_token_id:
+        query = query.filter(AuthToken.id != keep_token_id)
+    revoked = query.delete()
+    db.commit()
+    return revoked
+
+
+@router.post("/password", status_code=204)
+def change_password(body: ChangePassword, request: Request, db: Session = Depends(get_db),
+                    principal: Principal = Depends(current_principal)):
+    """Change your password. Every other sign-in of the account is ended; this one stays."""
+    if principal.user_id is None:
+        raise HTTPException(400, "Accounts are turned off on this server.")
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    user = db.get(User, principal.user_id)
+    if not user or not verify_password(body.current_password or "", user.password_hash):
+        raise HTTPException(403, "Incorrect password.")
+    check_new_password(body.new_password, user.email)
+    token = _bearer(request)
+    set_password(db, user, body.new_password, _digest(token) if token else None)

@@ -179,6 +179,15 @@ function App(){
     signedOut();
   }
 
+  async function changePassword(){
+    const current_password=window.prompt("Your current password");
+    if(!current_password) return;
+    const new_password=window.prompt("New password (at least 8 characters). Your other devices will be signed out.");
+    if(!new_password) return;
+    try{ await api("/auth/password",{method:"POST",json:{current_password,new_password}}); setError("Password changed."); }
+    catch(e:any){ setError(e.message); }
+  }
+
   async function deleteAccount(){
     const password=window.prompt("This permanently deletes your account, chats and documents. Enter your password to confirm.");
     if(!password) return;
@@ -215,7 +224,7 @@ function App(){
       </div>)}{active&&docs.length===0&&<small className="muted">Attach a file with 📎 to get started.</small>}</div>
       {user.email&&<div className="account">
         <small title={user.email}>{user.email}</small>
-        <div><button className="link" onClick={signOut}>Sign out</button><button className="link danger" onClick={deleteAccount}>Delete account</button></div>
+        <div><button className="link" onClick={signOut}>Sign out</button><button className="link" onClick={changePassword}>Change password</button><button className="link danger" onClick={deleteAccount}>Delete account</button></div>
       </div>}
     </aside>
     {menuOpen&&<div className="scrim" onClick={()=>setMenuOpen(false)}/>}
