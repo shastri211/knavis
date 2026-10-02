@@ -138,7 +138,10 @@ def test_documents_are_isolated_between_sessions(client, llm, upload, ask):
 
 
 def test_image_without_ocr_is_not_falsely_searchable(llm, session_id, upload, ask):
-    document, job = upload(session_id, "scan.png", b"\x89PNG\r\n\x1a\n", "image/png")
+    import io
+    from PIL import Image
+    png = io.BytesIO(); Image.new("RGB", (8, 8), "white").save(png, format="PNG")
+    document, job = upload(session_id, "scan.png", png.getvalue(), "image/png")
     assert document["status"] == "ocr_unavailable"
     assert ABSTAIN in ask(session_id, QUESTION)["message"]["content"]
 

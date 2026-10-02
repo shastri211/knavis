@@ -17,6 +17,23 @@ class Settings(BaseSettings):
     # evidence_min_dense OR it covers at least evidence_min_coverage of the question's
     # content terms. At most evidence_max_items chunks are sent to the LLM.
     evidence_min_dense:float=0.35; evidence_min_coverage:float=0.5; evidence_max_items:int=8
+    # Upload safety. A small file can still describe a huge one, so archives, PDFs and images are checked first.
+    max_archive_entries:int=5000
+    max_unpacked_mb:int=500
+    max_pdf_pages:int=1000
+    max_image_megapixels:int=100
+    max_documents_per_session:int=50
+    max_user_storage_mb:int=1000
+    # Accounts. With AUTH_ENABLED=false the app is single-user and every chat is visible (local use only).
+    auth_enabled:bool=True
+    allow_registration:bool=True
+    token_ttl_days:int=30
+    # Requests per minute per signed-in user (per client address for sign-in itself). 0 turns a limit off.
+    rate_limit_chat_per_minute:int=30
+    rate_limit_upload_per_minute:int=12
+    rate_limit_auth_per_minute:int=10
+    # Only behind a reverse proxy you control: take the client address from X-Forwarded-For.
+    trust_proxy_headers:bool=False
     # Spreadsheet analytics: questions that need computing (totals, counts, the highest group) are answered with
     # a read-only SQL query over the sheet, written by one model call and strictly validated before it runs.
     analytics_enabled:bool=True

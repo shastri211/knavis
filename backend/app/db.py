@@ -9,8 +9,13 @@ def _sqlite_pragmas(dbapi_connection,_record):
     # for a busy database instead of failing immediately with "database is locked".
     cursor=dbapi_connection.cursor(); cursor.execute('PRAGMA journal_mode=WAL'); cursor.execute('PRAGMA busy_timeout=15000'); cursor.close()
 SessionLocal=sessionmaker(bind=engine,autoflush=False,autocommit=False)
+def get_db():
+    """FastAPI dependency: one database session per request."""
+    s=SessionLocal()
+    try: yield s
+    finally: s.close()
 def init_db():
- from .models import ChatSession,Message,Document,Evidence,Job,UsageEvent,DocChunk,ExtractionCache,EmbeddingCache,QuotaUsage,SpecialistCache,DataTable
+ from .models import ChatSession,Message,Document,Evidence,Job,UsageEvent,DocChunk,ExtractionCache,EmbeddingCache,QuotaUsage,SpecialistCache,DataTable,User,AuthToken
  from .migrations import add_missing_columns
  from .retrieval import fts
  Base.metadata.create_all(engine)

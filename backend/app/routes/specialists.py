@@ -1,11 +1,13 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from ..auth import current_principal
 
 from ..config import settings
 from ..reliability.hosted import get_governor
 from ..specialists.ocr import get_ocr_provider
 from ..specialists.vision import get_vision_provider
 
-router = APIRouter(tags=["specialists"])
+router = APIRouter(tags=["specialists"], dependencies=[Depends(current_principal)])
 
 
 @router.get("/quota")

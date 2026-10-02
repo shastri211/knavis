@@ -15,6 +15,8 @@ os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="mrag_tests_")
 for _key in ("NVIDIA_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "ASSEMBLYAI_API_KEY",
              "QDRANT_URL", "QDRANT_API_KEY", "OPENROUTER_MODEL"):
     os.environ[_key] = ""
+for _limit in ("RATE_LIMIT_CHAT_PER_MINUTE", "RATE_LIMIT_UPLOAD_PER_MINUTE", "RATE_LIMIT_AUTH_PER_MINUTE"):
+    os.environ[_limit] = "0"          # limits are tested on their own; the golden tests send many requests quickly
 os.environ["DEFAULT_PROVIDER"] = "groq"
 os.environ["DEFAULT_MODEL"] = "openai/gpt-oss-20b"
 
@@ -70,11 +72,35 @@ def llm(monkeypatch):
     return fake
 
 
+TEST_EMAIL, TEST_PASSWORD = "tester@example.com", "correct horse battery"
+
+
+def sign_in(test_client, email=TEST_EMAIL, password=TEST_PASSWORD):
+    """Register (or sign in) and make every later request of this client carry the bearer token."""
+    response = test_client.post("/api/auth/register", json={"email": email, "password": password})
+    if response.status_code == 409:
+        response = test_client.post("/api/auth/login", json={"email": email, "password": password})
+    assert response.status_code in (200, 201), response.text
+    test_client.headers["Authorization"] = f"Bearer {response.json()['token']}"
+    return response.json()
+
+
 @pytest.fixture(scope="session")
 def client():
     from fastapi.testclient import TestClient
     from app.main import app
     with TestClient(app) as test_client:
+        sign_in(test_client)
+        yield test_client
+
+
+@pytest.fixture
+def other_client():
+    """A second signed-in user, for ownership tests."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as test_client:
+        sign_in(test_client, "someone.else@example.com", "another long passphrase")
         yield test_client
 
 
