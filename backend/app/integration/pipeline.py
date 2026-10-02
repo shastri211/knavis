@@ -84,6 +84,14 @@ class IntegratedRAGPipeline:
         self.qdrant.upsert(collection, ids, vectors, payloads)
         return stats
 
+    def delete_chunk_points(self, session_id, chunk_ids):
+        """Drop the vectors of chunks that are about to be replaced (the document is re-chunked)."""
+        if self.qdrant and chunk_ids:
+            self.qdrant.delete(
+                self.collection(session_id),
+                [str(uuid5(NAMESPACE_URL, f"{session_id}:{cid}")) for cid in chunk_ids],
+            )
+
     async def dense_search(self, session_id, query, k=20):
         """Dense semantic retrieval from the session-specific Qdrant collection."""
         if not self.qdrant:

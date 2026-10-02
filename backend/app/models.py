@@ -78,3 +78,20 @@ class EmbeddingCache(Base):
     dimension: Mapped[int] = mapped_column(Integer)
     vector: Mapped[bytes] = mapped_column(LargeBinary)               # float32
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class QuotaUsage(Base):
+    """Calls/pages/audio-seconds spent against one provider limit in the current window (see reliability.governor)."""
+    __tablename__ = 'quota_usage'
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)   # "<provider>:<unit>:<window>"
+    bucket: Mapped[int] = mapped_column(Integer)                      # which minute/hour/day the count belongs to
+    used: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SpecialistCache(Base):
+    """One paid specialist result (an OCR page, a described figure, a transcript), reusable across documents and retries."""
+    __tablename__ = 'specialist_cache'
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)   # "ocr:<file sha>:<page>", "fig:<image sha>", "asr:<file sha>"
+    provider: Mapped[str] = mapped_column(String(60))
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

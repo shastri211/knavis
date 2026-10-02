@@ -48,6 +48,13 @@ class FakeLLM:
         return Response(text, provider, model, {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
 
 
+@pytest.fixture(scope="session", autouse=True)
+def database():
+    """Create the schema once, so tests that touch the database do not depend on the app having started."""
+    from app.db import init_db
+    init_db()
+
+
 @pytest.fixture
 def llm(monkeypatch):
     fake = FakeLLM()

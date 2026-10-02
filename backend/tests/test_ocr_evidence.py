@@ -1,4 +1,4 @@
-from app.jobs import IMAGE_MIME_TYPES
+from app.specialists.ocr import IMAGE_MIME_TYPES
 from app.multimodal.image_evidence import ocr_to_evidence
 from app.multimodal.ocr import OCRDetection
 from app.multimodal.page_render import render_pdf_pages

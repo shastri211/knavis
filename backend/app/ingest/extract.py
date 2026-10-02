@@ -12,7 +12,7 @@ from .extractors.textual import (
 from .registry import format_of
 
 # Bumped whenever extraction output changes, so cached extractions are never reused across versions.
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"
 
 _EXTRACTORS = {
     "pdf": extract_pdf, "docx": extract_docx, "pptx": extract_pptx, "xlsx": extract_xlsx, "csv": extract_csv,

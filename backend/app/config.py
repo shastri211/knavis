@@ -17,6 +17,24 @@ class Settings(BaseSettings):
     # evidence_min_dense OR it covers at least evidence_min_coverage of the question's
     # content terms. At most evidence_max_items chunks are sent to the LLM.
     evidence_min_dense:float=0.35; evidence_min_coverage:float=0.5; evidence_max_items:int=8
+    # Hosted specialists (OCR, figure description, speech-to-text). Every *_provider setting is
+    # "auto" (first configured provider in the documented order), a provider name, or "none".
+    mistral_api_key:str=''; gemini_api_key:str=''
+    ocr_provider:str='auto'              # mistral | nvidia
+    vision_provider:str='auto'           # groq | gemini
+    vision_model:str='qwen/qwen3.8-27b'  # Groq vision model id (provider catalogs change; verify with check_config)
+    gemini_vision_model:str='gemini-2.5-flash-lite'
+    asr_provider:str='auto'              # groq | assemblyai
+    asr_model:str='whisper-large-v3-turbo'
+    # Work above this many hosted calls for one document waits for confirmation instead of spending quota.
+    confirm_above_calls:int=25
+    vision_max_figures_per_doc:int=8
+    # Gemini's free tier uses submitted content to improve Google's products. It stays off unless the
+    # owner of the data opts in here.
+    allow_free_tier_data_use:bool=False
+    # Override the built-in conservative quota defaults with your account's real limits, e.g.
+    # QUOTA_OVERRIDES={"mistral_ocr":{"pages":{"minute":60,"day":2000}}}
+    quota_overrides:dict[str,dict[str,dict[str,int]]]={}
     model_config=SettingsConfigDict(env_file=PROJECT_ROOT / '.env', extra='ignore')
 
     @field_validator('data_dir', mode='after')

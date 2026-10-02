@@ -37,33 +37,69 @@ def extract_text(path: Path) -> ExtractionResult:
     return ExtractionResult("text", paragraph_elements(read_text(path)))
 
 
-def extract_markdown(path: Path) -> ExtractionResult:
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _md_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def markdown_elements(text: str, id_prefix: str = "e", **common) -> list[Element]:
+    """Markdown as elements: headings, pipe tables (kept as tables), fenced code and paragraphs.
+
+    Used for .md files and for OCR output (Mistral returns markdown with tables). ``common`` is
+    applied to every element (page, source, locator, ...).
+    """
     elements: list[Element] = []
     buffer: list[str] = []
+    table: list[str] = []
     in_fence = False
 
-    def flush():
-        text = "\n".join(buffer).strip()
-        buffer.clear()
-        if text:
-            for part in paragraph_elements(text, start=len(elements)):
-                elements.append(part)
+    def new_id() -> str:
+        return f"{id_prefix}{len(elements)}"
 
-    for line in read_text(path).replace("\r\n", "\n").split("\n"):
+    def flush_text():
+        block = "\n".join(buffer).strip()
+        buffer.clear()
+        for part in re.split(r"\n\s*\n", block) if block else []:
+            if part.strip():
+                elements.append(Element(id=new_id(), kind=PARAGRAPH, text=part.strip(), **common))
+
+    def flush_table():
+        lines, table[:] = list(table), []
+        rows = [_md_cells(l) for l in lines if not _MD_TABLE_SEP_RE.match(l)]
+        rows = clean_rows(rows)
+        if len(rows) >= 2:
+            elements.append(Element(id=new_id(), kind=TABLE, text=render_rows(rows), rows=rows, **common))
+        elif lines:   # a lone pipe line is just text
+            buffer.extend(lines)
+
+    for line in text.replace("\r\n", "\n").split("\n"):
         if _FENCE_RE.match(line):
+            flush_table()
             in_fence = not in_fence
             buffer.append(line)
             continue
+        if not in_fence and line.strip().startswith("|") and line.count("|") >= 2:
+            flush_text()
+            table.append(line)
+            continue
+        flush_table()
         heading = None if in_fence else _MD_HEADING_RE.match(line)
         if heading:
-            flush()
-            elements.append(Element(id=f"e{len(elements)}", kind=HEADING, text=heading.group(2).strip(), level=len(heading.group(1))))
+            flush_text()
+            elements.append(Element(id=new_id(), kind=HEADING, text=heading.group(2).strip(), level=len(heading.group(1)), **common))
         elif not line.strip() and not in_fence:
-            flush()
+            flush_text()
         else:
             buffer.append(line)
-    flush()
-    return ExtractionResult("markdown", elements)
+    flush_table()
+    flush_text()
+    return elements
+
+
+def extract_markdown(path: Path) -> ExtractionResult:
+    return ExtractionResult("markdown", markdown_elements(read_text(path)))
 
 
 # ---- structured data ---------------------------------------------------------------------

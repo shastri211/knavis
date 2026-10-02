@@ -46,3 +46,8 @@ class QdrantStore:
             {"id": str(x.id), "score": float(x.score), "payload": x.payload}
             for x in hits
         ]
+
+    def delete(self, collection: str, ids) -> None:
+        """Remove points by id (no-op when the collection does not exist yet)."""
+        if ids and self.client.collection_exists(collection):
+            self.client.delete(collection_name=collection, points_selector=models.PointIdsList(points=list(ids)))

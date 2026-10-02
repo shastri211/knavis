@@ -3,6 +3,7 @@ import httpx
 from dataclasses import dataclass
 
 from .config import settings
+from .reliability.hosted import hosted_call
 
 logger = logging.getLogger("mragrag")
 
@@ -84,9 +85,14 @@ async def chat(provider, model, messages, **kwargs):
     base = {"nvidia": settings.nvidia_base_url, "groq": settings.groq_base_url,
             "openrouter": settings.openrouter_base_url}[provider]
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(f"{base}/chat/completions", headers=headers,
-                                     json={"model": model, "messages": messages, **kwargs})
-    response.raise_for_status()
-    data = response.json()
+
+    async def call():
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(f"{base}/chat/completions", headers=headers,
+                                         json={"model": model, "messages": messages, **kwargs})
+        response.raise_for_status()
+        return response.json()
+
+    # Quota governor + circuit breaker + bounded retries (QuotaExhausted tells the caller when to retry).
+    data = await hosted_call(f"{provider}_chat", call)
     return Response(data["choices"][0]["message"].get("content", ""), provider, model, data.get("usage"))

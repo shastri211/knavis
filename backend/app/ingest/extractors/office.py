@@ -2,8 +2,8 @@
 import re
 from pathlib import Path
 
-from ..elements import HEADING, PARAGRAPH, SLIDE, TABLE, Element, ExtractionError, ExtractionResult
-from ..tables import clean_rows, render_rows
+from ..elements import FIGURE, HEADING, PARAGRAPH, SLIDE, TABLE, Element, ExtractionError, ExtractionResult
+from ..tables import clean_cell, clean_rows, render_rows
 
 _HEADING_STYLE_RE = re.compile(r"^heading\s*(\d+)$", re.IGNORECASE)
 
@@ -81,6 +81,32 @@ def _shapes(shapes):
             yield from _shapes(shape.shapes)
 
 
+def _chart_text(chart) -> str:
+    """Title, type, and the plotted series as a table, straight from the chart object (no model call)."""
+    try:
+        title = chart.chart_title.text_frame.text.strip() if chart.has_title else ""
+    except Exception:
+        title = ""
+    try:
+        kind = chart.chart_type.name.replace("_", " ").lower()
+    except Exception:
+        kind = "chart"
+    rows: list[list[str]] = []
+    try:
+        for plot in chart.plots:
+            categories = [str(c) for c in plot.categories]
+            series = [(s.name or f"series {i}", list(s.values)) for i, s in enumerate(plot.series, 1)]
+            if not rows:
+                rows.append(["category"] + [name for name, _ in series])
+            for index, category in enumerate(categories):
+                rows.append([category] + [("" if index >= len(v) or v[index] is None else clean_cell(v[index])) for _, v in series])
+    except Exception:
+        pass
+    rows = clean_rows(rows)
+    head = f"Chart ({kind}){': ' + title if title else ''}"
+    return f"{head}\n{render_rows(rows)}" if len(rows) > 1 else ""
+
+
 def extract_pptx(path: Path) -> ExtractionResult:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -91,13 +117,23 @@ def extract_pptx(path: Path) -> ExtractionResult:
         raise ExtractionError("This presentation could not be opened; it may be corrupted.") from exc
 
     elements: list[Element] = []
-    figure_slides, picture_only_slides, tables = [], [], 0
+    figure_slides, picture_only_slides, tables, charts = [], [], 0, 0
     for number, slide in enumerate(presentation.slides, 1):
         title = slide.shapes.title.text.strip() if slide.shapes.title is not None and slide.shapes.title.has_text_frame else ""
         parts, pictures = [], 0
         for shape in _shapes(slide.shapes):
             if _shape_type(shape) == MSO_SHAPE_TYPE.PICTURE:
                 pictures += 1
+            if getattr(shape, "has_chart", False) and shape.has_chart:
+                # A native chart carries its data: read it locally instead of describing a picture of it.
+                chart_text = _chart_text(shape.chart)
+                if chart_text:
+                    charts += 1
+                    elements.append(Element(
+                        id=f"s{number}:chart{charts}", kind=FIGURE, text=chart_text, slide=number,
+                        locator=f"slide {number}, chart", source="native",
+                    ))
+                continue
             if getattr(shape, "has_table", False) and shape.has_table:
                 rows = clean_rows([[cell.text for cell in row.cells] for row in shape.table.rows])
                 if rows:

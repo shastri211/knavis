@@ -9,6 +9,7 @@ from .routes.agent import router as agent_router
 from .routes.jobs import router as jobs_router
 from .routes.production import router as production_router
 from .routes.finalization import router as finalization_router
+from .routes.specialists import router as specialists_router
 
 app = FastAPI(
     title="KNAVIS",
@@ -27,6 +28,7 @@ app.include_router(agent_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(production_router, prefix="/api")
 app.include_router(finalization_router, prefix="/api")
+app.include_router(specialists_router, prefix="/api")
 
 
 @app.middleware("http")

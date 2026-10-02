@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import httpx
 
+from ..reliability.hosted import hosted_call
+
 @dataclass
 class EmbeddingResult:
     vectors: list[list[float]]
@@ -30,14 +32,17 @@ class NVIDIAEmbeddingClient:
             "encoding_format": "float",
             "truncate": "END",
         }
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(
-                f"{self.base_url}/embeddings",
-                headers={"Authorization": f"Bearer {self.api_key}",
-                         "Content-Type": "application/json"},
-                json=payload,
-            )
-        r.raise_for_status()
-        data = r.json()
+        async def call():
+            async with httpx.AsyncClient(timeout=120) as client:
+                r = await client.post(
+                    f"{self.base_url}/embeddings",
+                    headers={"Authorization": f"Bearer {self.api_key}",
+                             "Content-Type": "application/json"},
+                    json=payload,
+                )
+            r.raise_for_status()
+            return r.json()
+
+        data = await hosted_call("nvidia_embed", call)
         vectors = [x["embedding"] for x in sorted(data["data"], key=lambda x: x["index"])]
         return EmbeddingResult(vectors=vectors, model=self.model)

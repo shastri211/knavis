@@ -16,6 +16,7 @@ from .config import settings
 from .agents.semantic_router import SemanticRouter, utility_answer, CONVERSATION_RESPONSES
 from .guardrails import validate_message, validate_upload, GuardrailError
 from .jobs import run_ingestion
+from .reliability.governor import QuotaExhausted
 from .agent_graph.graph import invoke_agent_graph
 from .integration.pipeline import get_pipeline
 
@@ -91,6 +92,12 @@ async def chat_route(p: MessageCreate, s: Session = Depends(db)):
             effective_content = f"{p.content}\nPrevious document question: {previous.content}"
     try:
         result = await invoke_agent_graph(session.id, effective_content, provider, model)
+    except QuotaExhausted as exc:
+        result = {
+            "answer": f"The free-tier limit for {exc.provider.replace('_', ' ')} is used up for now. {exc} "
+                      "Try again later or choose another provider in the model selector.",
+            "route": "blocked", "intent": "QUOTA_EXHAUSTED", "citations": [], "metadata": {},
+        }
     except Exception:
         logger.exception("Chat turn failed for session %s", session.id)
         result = {
@@ -168,3 +175,28 @@ async def upload(
         "document": DocumentOut.model_validate(doc),
         "job": {"id": job.id, "status": job.status, "progress": job.progress}
     }
+
+
+# What a person may do with a document that is waiting, and how the job should run afterwards.
+_PROCESS_ACTIONS = {
+    "awaiting_confirmation": {"confirm": "confirmed", "skip": "native_only"},
+    "waiting_for_quota": {"retry": "confirmed", "skip": "native_only"},
+    "ocr_unavailable": {"retry": "auto"},      # e.g. after adding an OCR key
+    "audio_unavailable": {"retry": "auto"},
+}
+
+
+@router.post("/documents/{doc_id}/process")
+def process_document(doc_id: str, body: ProcessRequest, background_tasks: BackgroundTasks, s: Session = Depends(db)):
+    """Continue a paused document: ``confirm`` a large plan, ``retry`` after a quota pause or after
+    configuring a provider, or ``skip`` the hosted work and keep the text that is already searchable."""
+    doc = s.get(Document, doc_id)
+    if not doc: raise HTTPException(404, "Document not found")
+    mode = _PROCESS_ACTIONS.get(doc.status, {}).get(body.action)
+    if mode is None:
+        raise HTTPException(400, f"Nothing to {body.action} for a document that is '{doc.status}'.")
+    job = Job(session_id=doc.session_id, document_id=doc.id, type="ingestion", status="queued", progress=0, stage="queued")
+    doc.status = "queued"
+    s.add(job); s.commit(); s.refresh(job); s.refresh(doc)
+    background_tasks.add_task(run_ingestion, job.id, mode)
+    return {"document": DocumentOut.model_validate(doc), "job": {"id": job.id, "status": job.status, "progress": job.progress}}

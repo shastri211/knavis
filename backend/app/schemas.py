@@ -16,3 +16,7 @@ class IngestionResult(BaseModel):
     chunks: int
     specialist_required: bool
     status: str
+
+
+class ProcessRequest(BaseModel):
+    action: str = Field(pattern="^(confirm|retry|skip)$")

@@ -1,3 +1,13 @@
+"""Ingestion job.
+
+Stage A (always, local, free): extract the file's native text and make it searchable at once.
+Stage B (only if the file needs OCR, figure descriptions or transcription): plan the hosted work,
+pause for confirmation when it is large, run it with per-unit caching, then re-chunk and re-index.
+
+A job can end *paused* instead of failed: ``awaiting_confirmation`` (a big plan needs a yes) or
+``waiting_for_quota`` (a free-tier limit was reached). Everything already paid for is cached, so
+resuming never pays twice.
+"""
 import asyncio
 from pathlib import Path
 
@@ -5,84 +15,59 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal
-from .models import Document, Job
+from .models import DocChunk, Document, Job
 from .guardrails import sanitize_error
 from .ingest.chunker import build_chunks
-from .ingest.elements import OCR_TEXT, TRANSCRIPT, Element, ExtractionError, format_clock
+from .ingest.elements import Element, ExtractionError
 from .ingest.extract import extract_document
 from .ingest.store import (
     get_cached_extraction, materialize, put_cached_extraction, save_chunks, save_elements, sha256_file,
 )
 from .integration.pipeline import get_pipeline
-from .multimodal.assemblyai import AssemblyAIClient
-from .multimodal.audio_evidence import transcript_to_evidence
-from .multimodal.image_evidence import ocr_to_evidence
-from .multimodal.ocr import NVIDIAOCRClient
-from .multimodal.page_render import render_pdf_pages
+from .reliability.governor import QuotaExhausted
+from .specialists.base import SpecialistUnavailable
+from .specialists.run import build_plan, execute_plan
+from .specialists.vision import get_vision_provider
 
-IMAGE_MIME_TYPES = {
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
-    ".tif": "image/tiff", ".tiff": "image/tiff", ".bmp": "image/bmp", ".gif": "image/gif",
-}
-
-# Specialist outcomes that are final: the (paid, rate-limited) work was done, so the result is cached.
+# Specialist outcomes that are final: the paid work was done, so the whole result can be cached by file hash.
 _CACHEABLE = {"complete", "ocr_no_text", "audio_no_text"}
+_FIGURE_KINDS = {"pdf", "docx", "pptx"}
+_UNAVAILABLE = {"ocr_unavailable", "audio_unavailable"}
 
 
-async def _ocr_elements(path: Path, document_id: str, pages: set[int] | None = None):
-    """OCR a standalone image, or only the given pages of a PDF."""
-    if not settings.nvidia_api_key:
-        return [], "ocr_unavailable"
-    client = NVIDIAOCRClient(settings.nvidia_api_key, settings.nvidia_ocr_base_url)
-    if path.suffix.lower() == ".pdf":
-        rendered = await asyncio.to_thread(
-            render_pdf_pages, path, settings.data_dir / "renders" / document_id, pages=pages)
-    else:
-        rendered = [(None, path)]
-    elements = []
-    for page, image_path in rendered:
-        # Rendered PDF pages are always PNG; standalone images need their real MIME type.
-        mime_type = "image/png" if page else IMAGE_MIME_TYPES.get(image_path.suffix.lower(), "application/octet-stream")
-        detections = await client.image_bytes(image_path.read_bytes(), mime_type, page)
-        for evidence in ocr_to_evidence(document_id, detections):
-            elements.append(Element(
-                id=evidence.id.split(":", 1)[1], kind=OCR_TEXT, text=evidence.text, page=evidence.page,
-                locator=f"page {evidence.page}" if evidence.page else "image", bbox=evidence.bbox,
-                source="ocr", confidence=evidence.confidence,
-                meta={"image_reference": image_path.name},
-            ))
-    return elements, "complete" if elements else "ocr_no_text"
+def _reading_order(elements: list[Element]) -> list[Element]:
+    """Interleave specialist elements (OCR text, figure descriptions) with native ones by page/slide."""
+    return sorted(elements, key=lambda e: e.page or e.slide or 0)   # stable: native text stays first on a page
 
 
-async def _audio_elements(path: Path, document_id: str):
-    if not settings.assemblyai_api_key:
-        return [], "audio_unavailable"
-    transcript = await AssemblyAIClient(settings.assemblyai_api_key).transcribe_file(path)
-    base = {"transcript_id": transcript.transcript_id, "language_confidence": transcript.language_confidence}
-    elements = [
-        Element(
-            id=segment.id.split(":", 1)[1], kind=TRANSCRIPT, text=segment.text, source="asr",
-            locator=f"{format_clock(segment.start_seconds)}-{format_clock(segment.end_seconds)}",
-            meta={**base, "language": segment.language, "speaker": segment.speaker,
-                  "start_s": segment.start_seconds, "end_s": segment.end_seconds},
-        )
-        for segment in transcript_to_evidence(document_id, transcript)
-    ]
-    if not elements and transcript.text.strip():
-        elements.append(Element(
-            id="transcript", kind=TRANSCRIPT, text=transcript.text, source="asr",
-            meta={**base, "language": transcript.language_code},
-        ))
-    return elements, "complete" if elements else "audio_no_text"
+async def _persist(db: Session, doc: Document, elements: list[Element]):
+    """Store elements and chunks and index the chunks; replaces what a previous stage stored."""
+    pipeline = get_pipeline()
+    old_ids = [row.id for row in db.query(DocChunk.id).filter(DocChunk.document_id == doc.id)]
+    pipeline.delete_chunk_points(doc.session_id, old_ids)
+    materialized = materialize(elements, doc.id)
+    stored = save_elements(db, doc, materialized)
+    rows = save_chunks(db, doc, build_chunks(materialized))
+    db.commit()
+    dense = await pipeline.index_chunks(doc.session_id, rows, doc.filename) if rows else None
+    return stored, rows, dense
 
 
-async def run_ingestion(job_id: str):
+def _pause(db: Session, job: Job, doc: Document, state: str, message: str, **extra) -> None:
+    doc.status = state
+    doc.metadata_json = {**(doc.metadata_json or {}), "pause": {"state": state, "message": message, **extra}}
+    job.status, job.stage, job.error = "paused", state, message
+    db.commit()
+
+
+async def run_ingestion(job_id: str, mode: str = "auto"):
+    """``mode``: ``auto`` (ask before big jobs), ``confirmed`` (spend what the plan needs), ``native_only`` (skip hosted work)."""
     db: Session = SessionLocal()
     try:
         job = db.get(Job, job_id)
         if not job:
             return
-        job.status, job.progress, job.stage = "running", 10, "extracting"
+        job.status, job.progress, job.stage, job.error = "running", 10, "extracting", None
         db.commit()
         doc = db.get(Document, job.document_id)
         if not doc:
@@ -92,55 +77,71 @@ async def run_ingestion(job_id: str):
 
         path = Path(doc.path)
         content_hash = (doc.metadata_json or {}).get("content_hash") or await asyncio.to_thread(sha256_file, path)
+        meta = {k: v for k, v in (doc.metadata_json or {}).items() if k != "pause"}
 
-        # Same file seen before: reuse its elements, including any OCR/transcription already paid for.
+        # The same file seen before: reuse its complete result, including OCR/transcription already paid for.
         cached = get_cached_extraction(db, content_hash)
-        specialist_status = "complete"
+        if cached and cached[0] in _FIGURE_KINDS and not cached[2].get("vision_done") and get_vision_provider():
+            cached = None   # figures were never described and a vision provider is configured now
         if cached:
             kind, elements, info = cached
-            info = {**info, "from_cache": True}
-            job.progress, job.stage = 35, "reusing_cache"
+            status, from_cache = "complete", True
+            job.progress, job.stage = 55, "reusing_cache"
+            db.commit()
         else:
             result = await asyncio.to_thread(extract_document, path, settings.data_dir / "converted" / doc.id)
-            kind, elements, info = result.kind, result.elements, {**result.info, "from_cache": False}
-            job.progress, job.stage = 35, "processing_specialists"
+            kind, native, info, from_cache = result.kind, result.elements, dict(result.info), False
+            job.progress, job.stage = 35, "storing_evidence"
             db.commit()
+            if native:   # stage A: the native text is searchable before any hosted call is made
+                await _persist(db, doc, native)
 
-            if kind == "image":
-                elements, specialist_status = await _ocr_elements(path, doc.id)
-            elif kind == "audio":
-                elements, specialist_status = await _audio_elements(path, doc.id)
-            elif kind == "pdf" and info.get("ocr_pages"):
-                ocr_elements, specialist_status = await _ocr_elements(path, doc.id, set(info["ocr_pages"]))
-                elements = elements + ocr_elements
-            if specialist_status in _CACHEABLE:
+            plan = await build_plan(db, path, kind, info, native, content_hash)
+            info["plan"] = plan.summary()
+            elements, status = native, "complete"
+
+            if plan.needed and mode != "native_only":
+                if plan.calls > settings.confirm_above_calls and mode == "auto":
+                    return _pause(
+                        db, job, doc, "awaiting_confirmation",
+                        f"This file needs about {plan.calls} hosted calls (OCR pages, figure descriptions, transcription). "
+                        "Confirm to process it, or skip to keep only the text that is already searchable.",
+                        calls=plan.calls, plan=plan.summary())
+                job.progress, job.stage = 55, "processing_specialists"
+                db.commit()
+                try:
+                    extra, status = await execute_plan(db, plan, path, content_hash)
+                except QuotaExhausted as exc:
+                    return _pause(db, job, doc, "waiting_for_quota", str(exc), resets_in=exc.resets_in if exc.resets_in != float("inf") else None)
+                except SpecialistUnavailable as exc:
+                    extra, status = [], "audio_unavailable" if plan.asr else "ocr_unavailable"
+                    info["unavailable_reason"] = str(exc)
+                elements = _reading_order(native + extra)
+            elif plan.needed:   # skipped on request: do not cache a deliberately partial result
+                info["specialists"] = "skipped"
+            info["vision_done"] = plan.vision is not None
+            if status in _CACHEABLE and info.get("specialists") != "skipped":
                 put_cached_extraction(db, content_hash, kind, elements, info)
-        db.commit()
-
-        job.progress, job.stage = 55, "storing_evidence"
-        db.commit()
-        elements = materialize(elements, doc.id)
-        stored = save_elements(db, doc, elements)
-        chunks = build_chunks(elements)
-        rows = save_chunks(db, doc, chunks)
-        db.commit()
-
-        dense = None
-        if rows:
-            job.progress, job.stage = 75, "indexing"
             db.commit()
-            dense = await get_pipeline().index_chunks(job.session_id, rows, doc.filename)
 
-        unavailable = specialist_status in {"ocr_unavailable", "audio_unavailable"}
-        doc.status = specialist_status if unavailable else ("indexed" if rows else "no_text")
+        job.progress, job.stage = 75, "indexing"
+        db.commit()
+        stored, rows, dense = await _persist(db, doc, elements)
+
+        doc.status = status if status in _UNAVAILABLE else ("indexed" if rows else ("no_text" if status == "complete" else status))
         doc.metadata_json = {
-            **(doc.metadata_json or {}), "detected_type": kind, "content_hash": content_hash,
-            "elements": stored, "chunks": len(rows), "specialist_status": specialist_status,
-            "from_cache": info["from_cache"], "info": info, "embedding": dense,
+            **meta, "detected_type": kind, "content_hash": content_hash, "elements": stored, "chunks": len(rows),
+            "specialist_status": status, "from_cache": from_cache, "info": info, "embedding": dense,
             "logical_documents": info.get("logical_documents"),
         }
         job.status, job.progress, job.stage = "completed", 100, doc.status
         db.commit()
+    except QuotaExhausted as exc:   # e.g. the embedding quota ran out while indexing; chunks are saved, vectors resume later
+        db.rollback()
+        job, doc = db.get(Job, job_id), None
+        doc = db.get(Document, job.document_id) if job else None
+        if job and doc:
+            _pause(db, job, doc, "waiting_for_quota", str(exc), resets_in=exc.resets_in if exc.resets_in != float("inf") else None)
     except Exception as exc:
         db.rollback()
         job = db.get(Job, job_id)

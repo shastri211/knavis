@@ -10,5 +10,5 @@ def _sqlite_pragmas(dbapi_connection,_record):
     cursor=dbapi_connection.cursor(); cursor.execute('PRAGMA journal_mode=WAL'); cursor.execute('PRAGMA busy_timeout=15000'); cursor.close()
 SessionLocal=sessionmaker(bind=engine,autoflush=False,autocommit=False)
 def init_db():
- from .models import ChatSession,Message,Document,Evidence,Job,UsageEvent,DocChunk,ExtractionCache,EmbeddingCache
+ from .models import ChatSession,Message,Document,Evidence,Job,UsageEvent,DocChunk,ExtractionCache,EmbeddingCache,QuotaUsage,SpecialistCache
  Base.metadata.create_all(engine)
