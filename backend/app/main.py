@@ -14,7 +14,7 @@ from .routes.specialists import router as specialists_router
 
 app = FastAPI(
     title="KNAVIS",
-    version="0.3.0",
+    version="0.4.0",
     description="KNAVIS: Knowledge Navigation Intelligence. CPU-first multilingual multimodal evidence-grounded RAG."
 )
 app.add_middleware(
@@ -61,4 +61,4 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"name":"KNAVIS","version":"0.3.0","status":"ok"}
+    return {"name":"KNAVIS","version":"0.4.0","status":"ok"}

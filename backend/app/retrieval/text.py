@@ -22,6 +22,8 @@ than so not no also into over under between during per via
 है हैं था थी थे क्या कौन कब कहाँ कैसे क्यों का की के को में से पर और या यह वह ये वो कि तो भी ही नहीं
 hai hain tha thi kya kaun kab kahan kaise kyun ka ki ke ko mein se par aur ya yeh woh ye vo bhi nahi
 mujhe batao bataiye
+kitne kitna kitni tak rakhe rakha rakhi jaate jaata jata jati milta milti milte hota hoti hote karna karne kare karein
+liye lie wala wali wale kuch koi kis kisi kaisa kaisi kyon hum aap tum apna apni mera meri hamara hamari sab saare
 """.split())
 
 _SUFFIXES = ("ing", "ed", "es", "s")
