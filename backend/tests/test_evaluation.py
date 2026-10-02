@@ -151,6 +151,7 @@ def test_summary_and_baseline_comparison_unit():
     assert compare_to_baseline({"headline": {"x": 0.90}}, {"headline": {"x": 0.95}}) == ["x: 0.95 -> 0.9"]
     assert compare_to_baseline({"headline": {"x": 0.94}}, {"headline": {"x": 0.95}}) == []          # within tolerance
     assert compare_to_baseline({"headline": {"latency_p50_s": 9}}, {"headline": {"latency_p50_s": 1}}) == []   # timing is not a quality metric
+    assert contains_all("Support: 9 am to 6 pm IST", ["9am", "6pm"]) and contains_all("from 9am", ["9 am"])   # spacing is not accuracy
     assert contains_all("Total: 32,970", ["32970"]) and contains_all("PRO plan is $29", ["$29", "pro"]) and not contains_all("x", ["y"])
 
 

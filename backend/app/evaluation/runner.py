@@ -62,7 +62,8 @@ def load_cases(path: str | Path) -> list[Case]:
 
 
 def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").replace(",", "")).casefold()
+    """Comparison form: no thousands commas and no whitespace at all (any Unicode space), so "9 am" equals "9am"."""
+    return re.sub(r"\s+", "", (text or "").replace(",", "")).casefold()
 
 
 def contains_all(text: str, needles) -> bool:

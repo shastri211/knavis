@@ -53,6 +53,32 @@ gate lets two look-alike questions through (`abs_refund`, `abs_headcount`), wher
 a real weakness, kept visible on purpose: a test asserts exactly these two leaks, so fixing the gate will make that
 test ask for an update to the baseline, and a regression elsewhere fails CI.
 
+## First live run (2026-10-02, Groq `openai/gpt-oss-20b`, NVIDIA embeddings)
+
+First pass over all 56 questions: 54 correct. Both misses were informative:
+
+- `pr_support`: the model wrote "9 am to 6 pm" with a narrow no-break space and the scorer wanted "9am". The answer was right;
+  the scorer now ignores whitespace.
+- `agg_camp_clicks` ("average clicks per campaign"): the model grouped by the campaign id and returned one average per row.
+  A genuine mistake. The SQL prompt now says that "per X" where each row *is* an X means one figure over all rows.
+
+Re-running the aggregation (12) and lookup (15) categories after those two changes: 27 of 27 correct. Treat that second
+result with care: the two fixes were made after seeing these very questions, so it shows the fixes work, not that the
+system is 100% accurate on unseen questions.
+
+| Metric (first full pass) | Value |
+|---|---|
+| answer accuracy | 0.95 (rest of the corpus: 1.00 after the fixes above) |
+| every answer cited, from the right file | 1.00 / 1.00 |
+| abstained when it should | 1.00 (8 of 8; the two look-alike leaks the offline gate shows were caught by the model) |
+| routing and injection | 1.00, with zero model calls |
+| model calls per answerable question | 1.0 (41 calls in total, about 22,000 tokens) |
+| latency p50 / p95 | 3.4 s / 10.6 s |
+| cross-lingual (Hindi question on an English document, and the reverse) | 2 of 2 with embeddings |
+
+One abstention cost two calls: a "how many ..." question looked analytical, the SQL writer declined it, and retrieval
+then answered ("not found"). The latency is the hosted model's generation time, not local work.
+
 What this does **not** prove: string matching cannot grade wording, the corpus is small and synthetic, scanned pages
 and audio are not covered (they need paid OCR/transcription), and conflicting-source handling is not scored. Treat the
 numbers as a regression gate and a way to compare changes, not as a certification.

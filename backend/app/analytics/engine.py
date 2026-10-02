@@ -36,6 +36,7 @@ Rules:
 - SELECT only (WITH is allowed). Never modify anything.
 - A column described as a flag (0/1) counts "yes" rows with SUM("col") and gives the rate with AVG("col"). Numeric text needs CAST(... AS REAL).
 - "Which X has the highest/lowest Y" or "top N": GROUP BY X, ORDER BY the measure DESC (or ASC) then by X, and use LIMIT 5, never LIMIT 1, so that a tie for first place is visible.
+- "per order/campaign/row" where each row IS that thing ("average clicks per campaign" in a sheet with one row per campaign) means one figure over all rows, not a GROUP BY on its id column. Group only by a category column, never by an identifier.
 - "How many rows/records": COUNT(*). Give every computed column a short readable alias such as total_sales.
 - To list individual rows, include "_row" (the row number in the original sheet).
 - Use the exact values listed for a column when filtering; use LOWER() for case-insensitive text comparison when unsure.
