@@ -44,6 +44,10 @@ def source_citations(evidence: list[dict], ids: list[int] | None = None) -> list
             "evidence_id": i,
             "source": md.get("source") or item.get("source_id"),
             "page": md.get("page"),
+            "locator": md.get("locator"),
+            "section": md.get("section"),
+            "slide": md.get("slide"),
+            "sheet": md.get("sheet"),
             "logical_document_id": md.get("logical_document_id"),
             "chunk_id": md.get("chunk_id") or item.get("id"),
         })

@@ -117,7 +117,7 @@ function App(){
 
       <section className="chat">
         {messages.length===0 && <div className="empty"><h1>Ask your documents.</h1><p>Upload a file, then ask a grounded question. Ordinary conversation is handled separately.</p></div>}
-        {messages.map((m,i)=><div key={i} className={`msg ${m.role}`}><div className="bubble"><div>{m.content}</div>{m.citations?.length>0&&<div className="citations">{m.citations.map((c:any,j:number)=><span key={j}>{c.source}{c.page?` · p.${c.page}`:""}{c.evidence_id?` · #${c.evidence_id}`:""}</span>)}</div>}</div></div>)}
+        {messages.map((m,i)=><div key={i} className={`msg ${m.role}`}><div className="bubble"><div>{m.content}</div>{m.citations?.length>0&&<div className="citations">{m.citations.map((c:any,j:number)=><span key={j}>{c.source}{c.locator?` · ${c.locator}`:(c.page?` · p.${c.page}`:"")}{c.evidence_id?` · #${c.evidence_id}`:""}</span>)}</div>}</div></div>)}
         {busy&&<div className="msg assistant"><div className="bubble muted">Thinking with evidence…</div></div>}
       </section>
 

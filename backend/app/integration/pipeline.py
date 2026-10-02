@@ -1,17 +1,18 @@
 from functools import lru_cache
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
 from ..config import settings
-from ..retrieval.chunker import chunk_text
 from ..retrieval.bm25 import BM25Index
 from ..retrieval.embeddings import NVIDIAEmbeddingClient
 from ..retrieval.qdrant_store import QdrantStore
 from ..retrieval.rrf import reciprocal_rank_fusion
 from ..retrieval.text import is_overview_query
 from ..grounding.answer_service import GroundedAnswerService
+from ..ingest.store import embed_with_cache
 from ..provider_service import ProviderService
 from ..db import SessionLocal
-from ..models import Evidence, Document
+from ..models import DocChunk, Document
 
 
 class IntegratedRAGPipeline:
@@ -43,125 +44,48 @@ class IntegratedRAGPipeline:
         Each chat session gets its own collection so documents from
         unrelated sessions cannot leak into retrieval.
         """
-        safe = "".join(
-            c if c.isalnum() else "_"
-            for c in session_id
-        )
+        safe = "".join(c if c.isalnum() else "_" for c in session_id)
         return f"session_{safe}"
 
-    async def index_evidence_nodes(self, session_id, nodes):
+    async def index_chunks(self, session_id, rows, source_name):
+        """Embed stored chunks (reusing cached vectors) and upsert them into Qdrant.
+
+        Lexical retrieval needs no indexing step: it reads the same chunks from SQLite.
+        Returns embedding stats, or ``None`` when dense retrieval is not configured.
         """
-        Convert extracted evidence nodes into chunks, embeddings,
-        lexical evidence, and Qdrant vectors.
+        if not rows or not self.qdrant:
+            return None
 
-        Qdrant collection dimensions are validated against the
-        configured embedding dimension before upsert.
-        """
-        chunks = []
+        with SessionLocal() as db:
+            vectors, stats = await embed_with_cache(db, self.embedding, [r.text for r in rows], "passage")
 
-        for node in nodes:
-            if not node.text.strip():
-                continue
-
-            chunks.extend(
-                chunk_text(
-                    node.id,
-                    node.text,
-                    metadata={
-                        "source": node.source_name,
-                        "page": node.page,
-                        "logical_document_id": node.logical_document_id,
-                        "modality": node.modality,
-                        "document_id": node.document_id,
-                        "slide": node.slide,
-                        "sheet": node.sheet,
-                    },
-                )
-            )
-
-        # If there is nothing to index, or dense retrieval is disabled,
-        # the SQLite/BM25 path can still provide lexical retrieval.
-        if not chunks or not self.qdrant:
-            return 0
-
-        vectors = await self.embedding.embed(
-            [c.text for c in chunks],
-            input_type="passage",
-        )
-
-        # ----------------------------------------------------------
-        # CRITICAL DIMENSION VALIDATION
-        # ----------------------------------------------------------
-        #
-        # len(vectors.vectors) = number of vectors/chunks.
-        #
-        # It is NOT the embedding dimension.
-        #
-        # The actual dimension is the length of one vector.
-        # ----------------------------------------------------------
-
-        if not vectors.vectors:
-            return 0
-
-        actual_dimension = len(vectors.vectors[0])
-        configured_dimension = settings.embedding_dimensions
-
-        if actual_dimension != configured_dimension:
+        # The dimension is the length of one vector (not the number of vectors).
+        actual_dimension = len(vectors[0])
+        if actual_dimension != settings.embedding_dimensions:
             raise ValueError(
                 "Embedding dimension mismatch: "
                 f"model returned {actual_dimension} dimensions, "
-                f"but EMBEDDING_DIMENSIONS is configured as "
-                f"{configured_dimension}."
+                f"but EMBEDDING_DIMENSIONS is configured as {settings.embedding_dimensions}."
             )
 
         collection = self.collection(session_id)
+        # Creates the session collection, or validates the dimension of an existing one.
+        self.qdrant.ensure_collection(collection, settings.embedding_dimensions)
 
-        # Create the session-specific collection if it does not exist.
-        # If it already exists, QdrantStore validates its dimension.
-        self.qdrant.ensure_collection(
-            collection,
-            configured_dimension,
-        )
-
-        ids = [
-            str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"{session_id}:{chunk.id}",
-                )
-            )
-            for chunk in chunks
-        ]
-
+        ids = [str(uuid5(NAMESPACE_URL, f"{session_id}:{row.id}")) for row in rows]
         payloads = [
             {
-                "text": chunk.text,
-                "source": chunk.metadata.get("source"),
-                **chunk.metadata,
-                "chunk_id": chunk.id,
+                **(row.metadata_json or {}),
+                "text": row.text, "source": source_name, "page": row.page, "locator": row.locator,
+                "section": row.section, "kind": row.kind, "document_id": row.document_id, "chunk_id": row.id,
             }
-            for chunk in chunks
+            for row in rows
         ]
+        self.qdrant.upsert(collection, ids, vectors, payloads)
+        return stats
 
-        self.qdrant.upsert(
-            collection,
-            ids,
-            vectors.vectors,
-            payloads,
-        )
-
-        return len(chunks)
-
-    async def dense_search(
-        self,
-        session_id,
-        query,
-        k=20,
-    ):
-        """
-        Perform dense semantic retrieval from the session-specific
-        Qdrant collection.
-        """
+    async def dense_search(self, session_id, query, k=20):
+        """Dense semantic retrieval from the session-specific Qdrant collection."""
         if not self.qdrant:
             return []
 
@@ -171,32 +95,19 @@ class IntegratedRAGPipeline:
         if not self.qdrant.client.collection_exists(collection):
             return []
 
-        emb = await self.embedding.embed(
-            [query],
-            input_type="query",
-        )
+        # Repeated questions reuse the cached query vector instead of calling the provider.
+        with SessionLocal() as db:
+            vectors, _ = await embed_with_cache(db, self.embedding, [query], "query")
 
-        if not emb.vectors:
-            return []
-
-        # Validate query embedding dimension before searching.
-        actual_dimension = len(emb.vectors[0])
-        configured_dimension = settings.embedding_dimensions
-
-        if actual_dimension != configured_dimension:
+        actual_dimension = len(vectors[0])
+        if actual_dimension != settings.embedding_dimensions:
             raise ValueError(
                 "Query embedding dimension mismatch: "
                 f"model returned {actual_dimension} dimensions, "
-                f"but EMBEDDING_DIMENSIONS is configured as "
-                f"{configured_dimension}."
+                f"but EMBEDDING_DIMENSIONS is configured as {settings.embedding_dimensions}."
             )
 
-        hits = self.qdrant.search(
-            collection,
-            emb.vectors[0],
-            k=k,
-        )
-
+        hits = self.qdrant.search(collection, vectors[0], k=k)
         return [
             {
                 "id": h["payload"].get("chunk_id", h["id"]),
@@ -208,119 +119,34 @@ class IntegratedRAGPipeline:
             for h in hits
         ]
 
-    async def retrieve(
-        self,
-        session_id,
-        query,
-        k=20,
-    ):
-        """
-        Hybrid retrieval.
-
-        SQLite provides the durable lexical source of truth.
-        Qdrant provides dense retrieval when configured and indexed.
-
-        Results are combined using reciprocal rank fusion.
-        """
-
-        db = SessionLocal()
-
-        try:
+    def _load_chunks(self, session_id):
+        """The session's chunks in reading order (document upload time, then position)."""
+        with SessionLocal() as db:
             rows = (
-                db.query(Evidence, Document)
-                .join(
-                    Document,
-                    Evidence.document_id == Document.id,
-                )
-                .filter(
-                    Document.session_id == session_id,
-                    Document.status != "failed",
-                )
+                db.query(DocChunk, Document)
+                .join(Document, DocChunk.document_id == Document.id)
+                .filter(Document.session_id == session_id, Document.status != "failed")
+                .order_by(Document.created_at, Document.id, DocChunk.ordinal)
                 .all()
             )
-
-            docs = []
-            # Reading order of every chunk (document upload time, page, position),
-            # used to sample whole-document overview requests.
-            order = {}
-
-            for evidence, document in rows:
-                if not evidence.text.strip():
-                    continue
-
-                metadata = {
-                    "document_id": document.id,
-                    "source": document.filename,
-                    "page": evidence.page,
-                    **(evidence.metadata_json or {}),
-                }
-
-                for position, chunk in enumerate(chunk_text(
-                    evidence.id,
-                    evidence.text,
-                    metadata=metadata,
-                )):
-                    order[chunk.id] = (
-                        str(document.created_at), document.id,
-                        evidence.page or 0, evidence.id, position,
-                    )
-                    docs.append(
-                        type(
-                            "C",
-                            (),
-                            {
-                                "id": chunk.id,
-                                "text": chunk.text,
-                                "metadata": {
-                                    **chunk.metadata,
-                                    "chunk_id": chunk.id,
-                                },
-                            },
-                        )
-                    )
-
-        finally:
-            db.close()
-
-        # "Summarize this document" has no content terms to match, so similarity search
-        # would return noise. Sample the documents themselves, in reading order.
-        if is_overview_query(query):
-            return self._overview_sample(docs, order, k)
-
-        # Build lexical retrieval from durable SQLite evidence.
-        self.bm25.build(docs)
-
-        sparse = self.bm25.search(
-            query,
-            k,
-        )
-
-        dense = []
-
-        # Dense retrieval is optional. The application remains usable
-        # through the lexical path when NVIDIA/Qdrant is unavailable.
-        if (
-            self.qdrant
-            and self.qdrant.client.collection_exists(
-                self.collection(session_id)
-            )
-        ):
-            dense = await self.dense_search(
-                session_id,
-                query,
-                k,
-            )
-
-        return reciprocal_rank_fusion(
-            [dense, sparse],
-            limit=k,
-        )
+            return [
+                SimpleNamespace(
+                    id=chunk.id, text=chunk.text,
+                    metadata={
+                        **(chunk.metadata_json or {}),
+                        "document_id": document.id, "source": document.filename, "page": chunk.page,
+                        "locator": chunk.locator, "section": chunk.section, "kind": chunk.kind, "chunk_id": chunk.id,
+                    },
+                )
+                for chunk, document in rows
+                if chunk.text.strip()
+            ]
 
     @staticmethod
-    def _overview_sample(docs, order, k):
+    def _overview_sample(docs, k):
         """Evenly spaced chunks from each document, in reading order, up to ``k`` total."""
         by_document = {}
-        for chunk in sorted(docs, key=lambda c: order[c.id]):
+        for chunk in docs:
             by_document.setdefault(chunk.metadata.get("document_id"), []).append(chunk)
         if not by_document:
             return []
@@ -342,14 +168,32 @@ class IntegratedRAGPipeline:
             for rank, c in enumerate(picked[:k])
         ]
 
-    async def answer(
-        self,
-        session_id,
-        query,
-        provider,
-        model,
-        language=None,
-    ):
+    async def retrieve(self, session_id, query, k=20):
+        """
+        Hybrid retrieval.
+
+        SQLite holds the chunks (lexical source of truth); Qdrant provides dense retrieval
+        when configured and indexed. Results are combined with reciprocal rank fusion.
+        """
+        docs = self._load_chunks(session_id)
+
+        # "Summarize this document" has no content terms to match, so similarity search
+        # would return noise. Sample the documents themselves, in reading order.
+        if is_overview_query(query):
+            return self._overview_sample(docs, k)
+
+        self.bm25.build(docs)
+        sparse = self.bm25.search(query, k)
+
+        dense = []
+        # Dense retrieval is optional; the application stays usable lexically when
+        # NVIDIA/Qdrant is unavailable.
+        if self.qdrant and self.qdrant.client.collection_exists(self.collection(session_id)):
+            dense = await self.dense_search(session_id, query, k)
+
+        return reciprocal_rank_fusion([dense, sparse], limit=k)
+
+    async def answer(self, session_id, query, provider, model, language=None):
         """
         Retrieve evidence and generate a grounded answer.
 
@@ -377,13 +221,7 @@ class IntegratedRAGPipeline:
                 "reason": "no_evidence",
             }
 
-        return await self.answerer.answer(
-            query,
-            candidates,
-            provider,
-            model,
-            language,
-        )
+        return await self.answerer.answer(query, candidates, provider, model, language)
 
 
 @lru_cache(maxsize=1)

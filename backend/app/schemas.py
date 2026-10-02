@@ -7,7 +7,7 @@ class MessageCreate(BaseModel): session_id:str; content:str=Field(min_length=1,m
 class MessageOut(BaseModel): id:str; role:str; content:str; language:str|None=None; intent:str|None=None; provider:str|None=None; model:str|None=None; created_at:datetime; model_config={'from_attributes':True}
 class ChatResponse(BaseModel): message:MessageOut; route:str; citations:list[dict]=[]
 class ModelOption(BaseModel): id:str; provider:str; name:str; category:str; modalities:list[str]; languages:str; status:str; selectable:bool
-class DocumentOut(BaseModel): id:str; filename:str; content_type:str; status:str; model_config={'from_attributes':True}
+class DocumentOut(BaseModel): id:str; filename:str; content_type:str; status:str; details:dict|None=None; model_config={'from_attributes':True}
 
 class IngestionResult(BaseModel):
     document_id: str
