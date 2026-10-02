@@ -5,7 +5,7 @@ from sqlalchemy.orm import Mapped,mapped_column,relationship
 from .db import Base
 def now(): return datetime.now(timezone.utc)
 class ChatSession(Base):
- __tablename__='sessions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); title:Mapped[str]=mapped_column(String(200),default='New chat'); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now); messages=relationship('Message',cascade='all,delete-orphan',back_populates='session'); documents=relationship('Document',cascade='all,delete-orphan',back_populates='session')
+ __tablename__='sessions'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); user_id:Mapped[str|None]=mapped_column(String(36),nullable=True,index=True); title:Mapped[str]=mapped_column(String(200),default='New chat'); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now); messages=relationship('Message',cascade='all,delete-orphan',back_populates='session'); documents=relationship('Document',cascade='all,delete-orphan',back_populates='session')
 class Message(Base):
  __tablename__='messages'; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid4())); session_id:Mapped[str]=mapped_column(ForeignKey('sessions.id'),index=True); role:Mapped[str]=mapped_column(String(20)); content:Mapped[str]=mapped_column(Text); language:Mapped[str|None]=mapped_column(String(50),nullable=True); intent:Mapped[str|None]=mapped_column(String(60),nullable=True); provider:Mapped[str|None]=mapped_column(String(40),nullable=True); model:Mapped[str|None]=mapped_column(String(200),nullable=True); citations:Mapped[list|None]=mapped_column(JSON,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); session=relationship('ChatSession',back_populates='messages')
 class Document(Base):
@@ -113,3 +113,20 @@ class DataTable(Base):
     last_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
     truncated: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class User(Base):
+    __tablename__ = 'users'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AuthToken(Base):
+    """A sign-in. Only the SHA-256 of the bearer token is stored, so a copy of the database cannot be used to sign in."""
+    __tablename__ = 'auth_tokens'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

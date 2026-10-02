@@ -19,3 +19,6 @@ CLAUDE.md
 
 # older prototype kept locally, not part of this repository
 multimodal_agentic_rag_from_scratch/
+
+# evaluation run output
+eval/results/

@@ -1,0 +1,28 @@
+# docker compose up --build   ->   http://127.0.0.1:8080
+# Settings come from .env (copy .env.example). Chats, uploads, tables and vectors live in the named volume.
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      TRUST_PROXY_HEADERS: "true"      # the client address comes from nginx
+      QDRANT_URL: ${QDRANT_URL:-}
+    volumes:
+      - knavis-data:/data
+    restart: unless-stopped
+    # Not published: only the frontend container (nginx) reaches it.
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${KNAVIS_BIND:-127.0.0.1}:${KNAVIS_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  knavis-data:

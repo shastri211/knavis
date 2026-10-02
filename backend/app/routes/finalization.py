@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from ..auth import current_principal
 from ..finalization.healthcheck import dependency_report, project_contract
 
-router = APIRouter(prefix="/final", tags=["finalization"])
+router = APIRouter(prefix="/final", tags=["finalization"], dependencies=[Depends(current_principal)])
 
 @router.get("/contract")
 def contract():

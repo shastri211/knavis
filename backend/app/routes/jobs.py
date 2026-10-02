@@ -1,21 +1,18 @@
-from fastapi import APIRouter, HTTPException
-from ..db import SessionLocal
-from ..models import Job
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+from ..auth import Principal, current_principal, owned_job
+from ..db import get_db
+
+router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(current_principal)])
+
 
 @router.get("/{job_id}")
-def get_job(job_id: str):
-    db = SessionLocal()
-    try:
-        job = db.get(Job, job_id)
-        if not job:
-            raise HTTPException(404, "Job not found")
-        return {
-            "id": job.id, "document_id": job.document_id, "type": job.type,
-            "status": job.status, "progress": job.progress,
-            "stage": job.stage, "error": job.error,
-            "created_at": job.created_at, "updated_at": job.updated_at,
-        }
-    finally:
-        db.close()
+def get_job(job_id: str, db: Session = Depends(get_db), me: Principal = Depends(current_principal)):
+    job = owned_job(db, me, job_id)
+    return {
+        "id": job.id, "document_id": job.document_id, "type": job.type,
+        "status": job.status, "progress": job.progress,
+        "stage": job.stage, "error": job.error,
+        "created_at": job.created_at, "updated_at": job.updated_at,
+    }

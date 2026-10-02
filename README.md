@@ -135,6 +135,31 @@ answers it instead. Spreadsheet text stays searchable for lookups.
 
 Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS` (see `.env.example`).
 
+## Accounts and safety
+
+- **Accounts:** register with an email and password (scrypt hashes; sign-in is a revocable bearer token stored hashed).
+  Every chat, document and job belongs to its owner; other users get 404. `DELETE /api/auth/me` removes an account and
+  everything it owns. The first account claims chats created before accounts existed. `AUTH_ENABLED=false` returns to
+  the single-user, open mode for a purely local install.
+- **Rate limits:** per user on chat and upload, per address and email on sign-in (`RATE_LIMIT_*`). The limiter is
+  in-process, so run one worker.
+- **Uploads:** read in chunks with a size cap; the real content type must match the extension (a program renamed
+  `.pdf` is refused); Office files are checked for decompression bombs, PDFs for page count, images for pixel count;
+  names are cleaned; chats and users have document and storage caps. See `backend/app/uploads.py`.
+- **Interface:** sign-in screen, delete or rename chats, remove documents, Process/Skip/Retry for paused documents,
+  upload errors, spreadsheet answers shown as tables with saved citations, and a drawer sidebar on phones.
+
+## Running in Docker
+
+`docker compose up --build` serves the app on http://127.0.0.1:8080 (nginx in front of the backend, data in a named
+volume). See `DEPLOYMENT.md` for exposing it safely and for the known limits.
+
+## Evaluation
+
+`python -m app.evaluation.run` (from `backend/`) runs 56 labelled questions over a synthetic corpus without any model
+or key and compares with a saved baseline; `--mode live --yes` asks them through a real provider and reports accuracy,
+citations, abstention, model calls per question and latency. See `eval/README.md`.
+
 ## Validation
 
 Run `python scripts/validate_project.py` or `pytest` from `backend/`. Provider
