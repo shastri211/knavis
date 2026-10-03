@@ -3,7 +3,6 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 
@@ -18,7 +17,7 @@ from .provider_service import ProviderService
 from .config import settings
 from .agents.semantic_router import SemanticRouter, utility_answer, CONVERSATION_RESPONSES
 from .guardrails import validate_message, validate_upload, GuardrailError
-from . import antivirus
+from . import antivirus, storage
 from .antivirus import ScanUnavailableError
 from .uploads import UploadTooLarge, clean_filename, inspect_upload, read_limited
 from .job_runner import run as run_job
@@ -187,14 +186,16 @@ async def upload(
     if used + len(raw) > settings.max_user_storage_mb * 1024 * 1024:
         raise HTTPException(413, "Your storage limit is reached. Delete some documents first.")
 
-    target = settings.upload_dir / (str(uuid4()) + "_" + name)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(raw)
+    try:
+        stored = await asyncio.to_thread(storage.save_upload, name, raw)   # the data directory, or the object store
+    except Exception as exc:
+        logger.error("Could not store an upload: %s: %s", type(exc).__name__, str(exc)[:200])
+        raise HTTPException(503, "File storage is not available right now. Try again in a moment.")
 
     doc = Document(
         session_id=session_id, filename=name,
         content_type=file.content_type or "application/octet-stream",
-        path=str(target), status="queued", metadata_json={"content_hash": content_hash, "size_bytes": len(raw)},
+        path=stored, status="queued", metadata_json={"content_hash": content_hash, "size_bytes": len(raw)},
     )
     s.add(doc); s.flush()
 
@@ -220,16 +221,38 @@ _PROCESS_ACTIONS = {
 }
 
 
+def _next_modes(doc: Document, previous: Job | None, action: str, hosted_mode: str) -> tuple[str, str | None]:
+    """The ``(mode, embed_mode)`` for the job that continues a paused document.
+
+    Hosted work and embedding are separate decisions. A pause for embedding is answered by confirm/skip about embedding only,
+    and leaves the hosted decision as it was; a pause for hosted work leaves an earlier embedding decision alone. Reindexing
+    starts both over.
+    """
+    if action == "reindex":
+        return hosted_mode, None
+    pause = (doc.metadata_json or {}).get("pause") or {}
+    embed_mode = previous.embed_mode if previous else None
+    if pause.get("kind") == "embedding":
+        return (previous.mode if previous and previous.mode else "auto"), ("confirmed" if action == "confirm" else "skipped")
+    if action == "skip" and pause.get("provider") == "nvidia_embed":   # skipping a quota wait on embeddings
+        embed_mode = "skipped"
+    return hosted_mode, embed_mode
+
+
 @secured.post("/documents/{doc_id}/process")
 def process_document(doc_id: str, body: ProcessRequest, background_tasks: BackgroundTasks, s: Session = Depends(db),
                      me: Principal = Depends(current_principal)):
-    """Continue a paused document: ``confirm`` a large plan, ``retry`` after a quota pause or after
-    configuring a provider, or ``skip`` the hosted work and keep the text that is already searchable."""
+    """Continue a paused document: ``confirm`` a large plan (hosted calls, or embedding a very large document), ``retry`` after a
+    quota pause or after configuring a provider, or ``skip`` the hosted work or the embedding and keep the text that is already
+    searchable."""
     doc = owned_document(s, me, doc_id)
-    mode = _PROCESS_ACTIONS.get(doc.status, {}).get(body.action)
-    if mode is None:
+    hosted_mode = _PROCESS_ACTIONS.get(doc.status, {}).get(body.action)
+    if hosted_mode is None:
         raise HTTPException(400, f"Nothing to {body.action} for a document that is '{doc.status}'.")
-    job = Job(session_id=doc.session_id, document_id=doc.id, type="ingestion", status="queued", progress=0, stage="queued", mode=mode, attempts=0)
+    previous = s.query(Job).filter(Job.document_id == doc.id).order_by(Job.created_at.desc()).first()
+    mode, embed_mode = _next_modes(doc, previous, body.action, hosted_mode)
+    job = Job(session_id=doc.session_id, document_id=doc.id, type="ingestion", status="queued", progress=0, stage="queued",
+              mode=mode, embed_mode=embed_mode, attempts=0)
     doc.status = "queued"
     s.add(job); s.commit(); s.refresh(job); s.refresh(doc)
     if settings.ingestion_inline:

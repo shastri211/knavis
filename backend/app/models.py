@@ -27,6 +27,7 @@ class Job(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     stage: Mapped[str] = mapped_column(String(80), default='queued')
     mode: Mapped[str|None] = mapped_column(String(20), nullable=True)        # auto | confirmed | native_only
+    embed_mode: Mapped[str|None] = mapped_column(String(20), nullable=True)  # None (ask when large) | confirmed | skipped
     attempts: Mapped[int|None] = mapped_column(Integer, nullable=True)       # times the job was started
     locked_by: Mapped[str|None] = mapped_column(String(80), nullable=True)   # the worker running it (see app.job_runner)
     locked_until: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)   # its lease; expires if the worker dies
@@ -109,13 +110,14 @@ class DataTable(Base):
     document_id: Mapped[str] = mapped_column(String(36), index=True)
     filename: Mapped[str] = mapped_column(String(255))
     sheet: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    table_name: Mapped[str] = mapped_column(String(120))              # the SQL name inside the session's table file
+    table_name: Mapped[str] = mapped_column(String(120))              # the SQL name inside the document's table file
     columns_json: Mapped[list] = mapped_column(JSON)                   # [{name, original, type, values?, min?, max?}]
     sample_json: Mapped[list | None] = mapped_column(JSON, nullable=True)   # the first few rows, as text
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     first_row: Mapped[int | None] = mapped_column(Integer, nullable=True)   # real sheet row numbers of the data
     last_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
     truncated: Mapped[bool] = mapped_column(default=False)
+    file_key: Mapped[str | None] = mapped_column(Text, nullable=True)   # storage reference of the document's table file (see app.storage); None: the old per-session file
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

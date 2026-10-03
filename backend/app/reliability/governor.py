@@ -167,10 +167,10 @@ class Governor:
             for provider in sorted(set(DEFAULT_LIMITS) | set(settings.quota_overrides)):
                 units = {}
                 for unit, windows in self.limits_for(provider).items():
-                    units[unit] = {
-                        window: {"used": self._used(db, provider, unit, window, now), "limit": limit}
-                        for window, limit in windows.items()
-                    }
+                    units[unit] = {}
+                    for window, limit in windows.items():
+                        used = self._used(db, provider, unit, window, now)
+                        units[unit][window] = {"used": used, "limit": limit, "remaining": max(0, limit - used)}
                 out.append({
                     "provider": provider, "limits": units,
                     "cooldown_seconds": max(0, round(self._cooldowns.get(provider, 0) - now)),

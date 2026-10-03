@@ -75,6 +75,25 @@ if settings.gemini_api_key and not settings.allow_free_tier_data_use:
 if not ocr:
     warnings.append("No OCR provider: scanned PDFs and images stay unsearchable (marked ocr_unavailable)")
 
+# ---- storage and embedding limit ----
+print()
+print("Storage:")
+if settings.storage_backend.strip().lower() == "s3":
+    where = settings.s3_endpoint_url or "AWS S3"
+    print(f"  Uploads and spreadsheet tables: S3 bucket {settings.s3_bucket or '(S3_BUCKET not set)'} at {where}"
+          f"{' (prefix ' + settings.s3_prefix + ')' if settings.s3_prefix else ''}")
+    if not settings.s3_bucket:
+        warnings.append("STORAGE_BACKEND=s3 but S3_BUCKET is not set; uploads will fail")
+    if bool(settings.s3_access_key_id) != bool(settings.s3_secret_access_key):
+        warnings.append("Set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither (to use the AWS default credential chain)")
+    if settings.s3_endpoint_url and not settings.s3_path_style:
+        print("  (a self-hosted server usually needs S3_PATH_STYLE=true)")
+else:
+    print(f"  Uploads and spreadsheet tables: local disk under {settings.data_dir}")
+if settings.nvidia_api_key:
+    limit = settings.max_embed_chunks_per_doc
+    print(f"  A document needing more than {limit} chunks embedded waits for a yes." if limit > 0 else "  No per-document embedding limit (MAX_EMBED_CHUNKS_PER_DOC=0).")
+
 # ---- model ids against the providers' own catalogs (free list calls, no tokens) ----
 def listed_models(base_url: str, key: str) -> set[str] | None:
     try:
@@ -86,6 +105,14 @@ def listed_models(base_url: str, key: str) -> set[str] | None:
         return None
 
 if "--online" in sys.argv:
+    if settings.storage_backend.strip().lower() == "s3" and settings.s3_bucket:
+        from app import storage
+        try:
+            storage.check()
+            print()
+            print("  object storage: bucket reachable")
+        except Exception as exc:
+            warnings.append(f"Object storage is not usable: {type(exc).__name__}: {str(exc)[:160]}")
     print()
     print("Checking configured model ids against provider catalogs...")
     if settings.groq_api_key:

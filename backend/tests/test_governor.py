@@ -105,7 +105,7 @@ async def test_usage_known_only_afterwards_is_recorded_and_snapshot_reports_it(c
     governor.record(name, audio_seconds=599)
     assert governor.remaining(name, "audio_seconds") == 400
     entry = next(e for e in governor.snapshot() if e["provider"] == name)
-    assert entry["limits"]["audio_seconds"]["day"] == {"used": 600, "limit": 1000}
+    assert entry["limits"]["audio_seconds"]["day"] == {"used": 600, "limit": 1000, "remaining": 400}
 
 
 def test_defaults_include_the_verified_groq_whisper_free_limits():

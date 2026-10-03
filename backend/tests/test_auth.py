@@ -161,7 +161,7 @@ def test_a_users_documents_are_not_retrievable_by_another_users_questions(client
 
 def test_deleting_my_account_deletes_my_data_and_signs_me_out(llm, upload):
     from fastapi.testclient import TestClient
-    from app.analytics.tablestore import table_file
+    from conftest import table_files
     from app.db import SessionLocal
     from app.main import app
     from app.models import ChatSession, DocChunk, Document, User
@@ -172,7 +172,7 @@ def test_deleting_my_account_deletes_my_data_and_signs_me_out(llm, upload):
         sid = c.post("/api/sessions", json={"title": "bye"}).json()["id"]
         for name, data, kind in (("policy.txt", make_txt(), "text/plain"), (CAMPAIGN_FILE, make_campaign_xlsx(), XLSX_TYPE)):
             assert c.post("/api/uploads", data={"session_id": sid}, files={"file": (name, data, kind)}).status_code == 200
-        assert table_file(sid).exists()
+        assert table_files(sid)
         assert c.request("DELETE", "/api/auth/me", json={"password": "wrong password!!"}).status_code == 403
         assert c.request("DELETE", "/api/auth/me", json={"password": "long enough password"}).status_code == 204
         assert c.get("/api/auth/me").status_code == 401
@@ -180,7 +180,7 @@ def test_deleting_my_account_deletes_my_data_and_signs_me_out(llm, upload):
         assert db.query(User).filter(User.email == email).count() == 0
         assert db.get(ChatSession, sid) is None and db.query(Document).filter(Document.session_id == sid).count() == 0
         assert db.query(DocChunk).filter(DocChunk.session_id == sid).count() == 0
-    assert not table_file(sid).exists()
+    assert not table_files(sid)
 
 
 def test_the_first_account_claims_chats_that_predate_accounts(tmp_path):

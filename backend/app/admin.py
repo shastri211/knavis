@@ -7,12 +7,14 @@
     python -m app.admin delete-user EMAIL --yes     # removes the account and all its data
     python -m app.admin usage                       # totals, and the biggest accounts by storage
     python -m app.admin copy-database URL           # copy every row of the current database into an empty one (SQLite -> PostgreSQL)
+    python -m app.admin migrate-storage             # upload local files (uploads, spreadsheet tables) to the S3 bucket in use
 
 Run it where the data lives (in Docker: ``docker compose exec backend python -m app.admin users``).
 """
 import argparse
 import getpass
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -20,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from .auth import MAX_PASSWORD, MIN_PASSWORD, check_new_password, delete_user, hash_password, normalise_email, set_password
 from .db import SessionLocal, init_db
-from .models import AuthToken, ChatSession, DocChunk, Document, User
+from . import storage
+from .models import AuthToken, ChatSession, DataTable, DocChunk, Document, User
 
 
 class AdminError(Exception):
@@ -127,6 +130,45 @@ def copy_database(target_url: str, batch: int = 1000) -> dict[str, int]:
     return copied
 
 
+def migrate_storage(db: Session, *, delete_local: bool = False) -> dict[str, int]:
+    """Upload the files that still live on this host's disk to the configured S3 bucket and point their rows at the objects.
+
+    Documents uploaded with the local backend keep working without this (their reference says where they are); run it when
+    you move an install to object storage so that other hosts can reach them. Safe to repeat: only local references move.
+    Returns ``{"documents": n, "tables": n, "missing": n}``.
+    """
+    if storage.backend_name() != "s3":
+        raise AdminError("Set STORAGE_BACKEND=s3 and the S3_* settings first.")
+    backend = storage.active()
+    moved = {"documents": 0, "tables": 0, "missing": 0}
+    for document in db.query(Document).all():
+        if storage.is_object(document.path):
+            continue
+        source = storage.local_path(document.path)
+        if not source.is_file():
+            moved["missing"] += 1
+            continue
+        key = f"uploads/{source.name}"
+        backend.put_file(key, source)
+        document.path = storage.make_ref(key)
+        db.commit()
+        moved["documents"] += 1
+        if delete_local:
+            source.unlink(missing_ok=True)
+    refs = {ref for (ref,) in db.query(DataTable.file_key).filter(DataTable.file_key.isnot(None)) if not storage.is_object(ref)}
+    for ref in sorted(refs):
+        source = storage.local_path(ref)
+        if not source.is_file():
+            moved["missing"] += 1
+            continue
+        key = ref if not Path(ref).is_absolute() else f"tables/{source.parent.name}/{source.name}"
+        backend.put_file(key, source)
+        db.query(DataTable).filter(DataTable.file_key == ref).update({"file_key": storage.make_ref(key)})
+        db.commit()
+        moved["tables"] += 1
+    return moved
+
+
 def _password(args) -> str:
     if args.password:
         return args.password
@@ -147,6 +189,8 @@ def main(argv=None) -> int:
         sub.add_argument("--password", help=f"{MIN_PASSWORD}-{MAX_PASSWORD} characters; prompted for if omitted (preferred: it stays out of shell history)")
     sub = commands.add_parser("copy-database")
     sub.add_argument("url", help="e.g. postgresql://user:password@host:5432/knavis (must be empty)")
+    sub = commands.add_parser("migrate-storage")
+    sub.add_argument("--delete-local", action="store_true", help="remove each local upload once it is in the bucket")
     sub = commands.add_parser("revoke-tokens")
     sub.add_argument("email", nargs="?")
     sub = commands.add_parser("delete-user")
@@ -177,6 +221,10 @@ def main(argv=None) -> int:
                 copied = copy_database(args.url)
                 print("Copied " + ", ".join(f"{name}: {n}" for name, n in copied.items() if n) + ".")
                 print("Now set DATABASE_URL to the new database and restart; the keyword index rebuilds on first start.")
+            elif args.command == "migrate-storage":
+                done = migrate_storage(db, delete_local=args.delete_local)
+                print(f"Moved {done['documents']} upload(s) and {done['tables']} table file(s) to the bucket"
+                      + (f"; {done['missing']} file(s) were not on this host's disk." if done["missing"] else "."))
             elif args.command == "revoke-tokens":
                 print(f"{revoke_tokens(db, args.email)} sign-in(s) ended.")
             elif args.command == "delete-user":

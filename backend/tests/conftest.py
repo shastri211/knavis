@@ -222,6 +222,13 @@ SAMPLES = {
 }
 
 
+def table_files(session_id):
+    """The spreadsheet table files of a chat that exist on this host (the per-document files, not derived views)."""
+    from app.analytics.tablestore import session_prefix
+    from app.config import settings
+    return sorted(p for p in (settings.data_dir / session_prefix(session_id)).glob("*.sqlite") if not p.name.startswith("view-"))
+
+
 @pytest.fixture
 def upload(client):
     """Upload bytes to a session and return (document, job). Background ingestion has finished on return."""

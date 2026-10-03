@@ -10,7 +10,7 @@ import signal
 
 from .config import settings
 from .db import init_db, startup_lock
-from .ingest.store import migrate_legacy_documents
+from . import repairs
 from .job_runner import WORKER_ID, recover_unfinished_jobs, sweep_forever
 from .reliability.logging import configure
 
@@ -21,7 +21,7 @@ async def main() -> None:
     configure()
     init_db()
     with startup_lock():
-        migrate_legacy_documents()
+        await asyncio.to_thread(repairs.run)
     logger.info("Ingestion worker %s started (poll every %ss, %s at a time)", WORKER_ID, settings.job_poll_seconds, settings.ingestion_concurrency)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

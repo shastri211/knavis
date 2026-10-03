@@ -1,20 +1,34 @@
 """Spreadsheet sheets and CSV files as real, queryable tables.
 
-Each chat session owns one small SQLite file (``<data_dir>/tables/<session>.sqlite``) holding one table per
-sheet. A catalog row per table (``DataTable`` in the application database) records its columns, their
-types, the values of low-cardinality columns and the real sheet row numbers, which is what the SQL writer
-sees and what a citation points at. Keeping each session's data in its own file means a query can only ever
-reach that session's tables, and deleting the session is deleting the file.
+Each spreadsheet document owns one small SQLite file holding one table per sheet. The file is stored through
+``app.storage`` (the data directory, or an object store shared by several hosts) under a key that is new on every
+write (``tables/<session>/<document>-<token>.sqlite``), so a copy cached on any host's disk is never stale. A catalog
+row per table (``DataTable`` in the application database) records the file's reference, the table's columns, their
+types, the values of low-cardinality columns and the real sheet row numbers, which is what the SQL writer sees and what
+a citation points at.
+
+A question is answered from one local file that holds every table of the chat: a chat with a single spreadsheet uses its
+file directly, several are merged into a derived "view" file (cheap, rebuilt whenever the set of files changes). Each
+chat's data sits in files of its own, so a query can only ever reach that chat's tables, and deleting the chat is
+deleting its files.
+
+Databases from before object storage kept one file per chat (``<data dir>/tables/<session>.sqlite``);
+``migrate_legacy_table_files`` splits those into per-document files once, at start-up.
 """
 import logging
 import re
+import shutil
 import sqlite3
+import time
 import unicodedata
 from collections import Counter
+from hashlib import sha1
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from .. import storage
 from ..config import settings
 from ..ingest.extractors.tabular import SheetTable
 from ..models import DataTable, Document
@@ -39,9 +53,18 @@ def tables_dir() -> Path:
     return settings.data_dir / "tables"
 
 
-def table_file(session_id: str) -> Path:
-    safe = re.sub(r"[^0-9a-zA-Z_-]", "", session_id)
-    return tables_dir() / f"{safe}.sqlite"
+def _safe(identifier: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z_-]", "", identifier)
+
+
+def session_prefix(session_id: str) -> str:
+    """The storage key prefix holding every table file of a chat."""
+    return f"tables/{_safe(session_id)}/"
+
+
+def legacy_table_file(session_id: str) -> Path:
+    """The single per-chat file used before table files were per document."""
+    return tables_dir() / f"{_safe(session_id)}.sqlite"
 
 
 # ---- typing --------------------------------------------------------------------------------
@@ -161,13 +184,24 @@ def _describe_column(name: str, original: str, kind: str, values: list) -> dict:
     return info
 
 
+def _delete_ref(ref: str) -> None:
+    """Remove a table file from storage and from this host's cache."""
+    storage.delete(ref)
+    if storage.is_object(ref):
+        _remove_file(settings.data_dir / ref[len(storage.S3_SCHEME):])
+
+
 def replace_document_tables(db: Session, document: Document, sheets: list[SheetTable]) -> list[DataTable]:
-    """Load a document's sheets as tables, replacing any it had before. The caller commits."""
-    drop_document_tables(db, document.id)
+    """Load a document's sheets as tables in a new file, replacing any it had before. The caller commits."""
+    previous = {e.file_key for e in db.query(DataTable).filter(DataTable.document_id == document.id) if e.file_key}
+    drop_document_tables(db, document.id, remove_files=False)
     if not sheets:
+        for ref in previous:
+            _delete_ref(ref)
         return []
     taken = {name for (name,) in db.query(DataTable.table_name).filter(DataTable.session_id == document.session_id)}
-    path = table_file(document.session_id)
+    key = f"{session_prefix(document.session_id)}{_safe(document.id)}-{uuid4().hex[:12]}.sqlite"
+    path = settings.data_dir / key
     entries, connection = [], _connect(path)
     try:
         for sheet in sheets:
@@ -181,53 +215,203 @@ def replace_document_tables(db: Session, document: Document, sheets: list[SheetT
             table = _table_name(document.filename, sheet.sheet, len(sheets), taken)
             taken.add(table)
             definition = ", ".join([f"{_quote(ROW_COLUMN)} INTEGER"] + [f"{_quote(c['name'])} {c['type']}" for c in columns])
-            connection.execute(f"DROP TABLE IF EXISTS {_quote(table)}")
             connection.execute(f"CREATE TABLE {_quote(table)} ({definition})")
             connection.executemany(
                 f"INSERT INTO {_quote(table)} VALUES ({', '.join('?' * (width + 1))})",
                 ([number] + [column[i] for column in converted] for i, number in enumerate(sheet.numbers)),
             )
-            entry = DataTable(
+            entries.append(DataTable(
                 session_id=document.session_id, document_id=document.id, filename=document.filename, sheet=sheet.sheet,
                 table_name=table, columns_json=columns, row_count=len(sheet.rows),
                 sample_json=[row[:width] for row in sheet.rows[:SAMPLE_ROWS]],
                 first_row=sheet.numbers[0], last_row=sheet.numbers[-1], truncated=sheet.truncated,
-            )
-            db.add(entry)
-            entries.append(entry)
+            ))
         connection.commit()
-    finally:
         connection.close()
+        ref = storage.publish(key, path)   # object storage: upload now; the local file stays as this host's cache
+    except BaseException:
+        connection.close()
+        _remove_file(path)
+        raise
+    for entry in entries:
+        entry.file_key = ref
+        db.add(entry)
     db.flush()
+    for old in previous:   # only once the new rows are in: a failure above keeps the old file the catalog still points at
+        _delete_ref(old)
     return entries
 
 
-def drop_document_tables(db: Session, document_id: str) -> None:
-    """Remove a document's tables from its session's table file and from the catalog. The caller commits."""
+def drop_document_tables(db: Session, document_id: str, *, remove_files: bool = True) -> None:
+    """Remove a document's tables from storage and from the catalog. The caller commits."""
     entries = db.query(DataTable).filter(DataTable.document_id == document_id).all()
     if not entries:
         return
-    path = table_file(entries[0].session_id)
-    if path.exists():
-        connection = _connect(path)
-        try:
-            for entry in entries:
-                connection.execute(f"DROP TABLE IF EXISTS {_quote(entry.table_name)}")
-            connection.commit()
-            remaining = connection.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0]
-        finally:
-            connection.close()
-        if not remaining:
-            _remove_file(path)
+    if remove_files:
+        for ref in {e.file_key for e in entries if e.file_key}:
+            _delete_ref(ref)
+    legacy = [e for e in entries if not e.file_key]
+    if legacy:
+        _drop_from_legacy_file(legacy[0].session_id, [e.table_name for e in legacy])
     for entry in entries:
         db.delete(entry)
     db.flush()
 
 
+def _drop_from_legacy_file(session_id: str, table_names: list[str]) -> None:
+    """Tables of a chat that still sit in the old per-chat file (the start-up migration has not moved them)."""
+    path = legacy_table_file(session_id)
+    if not path.exists():
+        return
+    connection = _connect(path)
+    try:
+        for name in table_names:
+            connection.execute(f"DROP TABLE IF EXISTS {_quote(name)}")
+        connection.commit()
+        remaining = connection.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0]
+    finally:
+        connection.close()
+    if not remaining:
+        _remove_file(path)
+
+
 def drop_session_tables(db: Session, session_id: str) -> None:
-    """Remove every table of a session: the file and the catalog rows. The caller commits."""
-    _remove_file(table_file(session_id))
+    """Remove every table of a chat: its files (including strays) and the catalog rows. The caller commits."""
+    for ref in {e.file_key for e in db.query(DataTable).filter(DataTable.session_id == session_id) if e.file_key}:
+        _delete_ref(ref)
+    storage.delete_prefix(session_prefix(session_id))        # files whose rows never committed
+    shutil.rmtree(settings.data_dir / session_prefix(session_id).rstrip("/"), ignore_errors=True)   # this host's cache
+    _remove_file(legacy_table_file(session_id))
     db.query(DataTable).filter(DataTable.session_id == session_id).delete()
+
+
+# ---- reading -------------------------------------------------------------------------------
+
+_VIEW_BATCH = 8            # SQLite allows 10 attached databases by default
+_VIEW_KEEP_SECONDS = 600
+
+
+def query_file(session_id: str) -> Path | None:
+    """A local SQLite file holding every table of the chat, or ``None`` when it has none.
+
+    The files are looked up from the catalog by chat, never taken from the caller, so a query cannot be pointed at another
+    chat's data. Files that live in object storage are downloaded into this host's cache the first time they are needed.
+    """
+    from ..db import SessionLocal
+    with SessionLocal() as db:
+        refs = sorted({ref for (ref,) in db.query(DataTable.file_key).filter(
+            DataTable.session_id == session_id, DataTable.file_key.isnot(None))})
+    if not refs:
+        return None
+    try:
+        paths = [storage.ensure_local(ref) for ref in refs]
+    except FileNotFoundError:
+        return None
+    if len(paths) == 1:
+        return paths[0]
+    folder = settings.data_dir / session_prefix(session_id).rstrip("/")
+    view = folder / f"view-{sha1('|'.join(refs).encode()).hexdigest()[:16]}.sqlite"
+    if not view.exists():
+        _build_view(view, paths)
+        now = time.time()
+        for stale in folder.glob("view-*.sqlite"):
+            if stale != view and now - stale.stat().st_mtime > _VIEW_KEEP_SECONDS:
+                _remove_file(stale)
+    return view
+
+
+def _build_view(view: Path, sources: list[Path]) -> None:
+    partial = view.with_name(f".{view.name}.{uuid4().hex[:8]}.part")
+    connection = _connect(partial)
+    try:
+        for start in range(0, len(sources), _VIEW_BATCH):
+            batch = sources[start:start + _VIEW_BATCH]
+            for number, source in enumerate(batch):
+                connection.execute(f"ATTACH DATABASE ? AS src{number}", (str(source.resolve()),))
+            for number in range(len(batch)):
+                schema = f"src{number}"
+                for name, ddl in connection.execute(
+                        f"SELECT name, sql FROM {schema}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall():
+                    connection.execute(ddl)
+                    connection.execute(f"INSERT INTO {_quote(name)} SELECT * FROM {schema}.{_quote(name)}")
+            connection.commit()
+            for number in range(len(batch)):
+                connection.execute(f"DETACH DATABASE src{number}")
+        connection.close()
+        partial.replace(view)
+    except BaseException:
+        connection.close()
+        _remove_file(partial)
+        raise
+
+
+def migrate_legacy_table_files() -> int:
+    """Split old per-chat table files into per-document files (once, at start-up). Returns the documents moved."""
+    from ..db import SessionLocal
+    moved = 0
+    with SessionLocal() as db:
+        by_session: dict[str, list[DataTable]] = {}
+        for entry in db.query(DataTable).filter(DataTable.file_key.is_(None)).all():
+            by_session.setdefault(entry.session_id, []).append(entry)
+        for session_id, entries in by_session.items():
+            source = legacy_table_file(session_id)
+            if not source.exists():
+                continue   # nothing to move; these tables stay unqueryable until the document is processed again
+            by_document: dict[str, list[DataTable]] = {}
+            for entry in entries:
+                by_document.setdefault(entry.document_id, []).append(entry)
+            for document_id, rows in by_document.items():
+                key = f"{session_prefix(session_id)}{_safe(document_id)}-{uuid4().hex[:12]}.sqlite"
+                target = settings.data_dir / key
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+                    keep = {r.table_name for r in rows}
+                    connection = _connect(target)
+                    try:
+                        for (name,) in connection.execute(
+                                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall():
+                            if name not in keep:
+                                connection.execute(f"DROP TABLE {_quote(name)}")
+                        connection.commit()
+                        connection.execute("VACUUM")
+                    finally:
+                        connection.close()
+                    ref = storage.publish(key, target)
+                except Exception as exc:
+                    logger.warning("Could not move the tables of document %s to their own file: %s: %s",
+                                   document_id, type(exc).__name__, str(exc)[:120])
+                    _remove_file(target)
+                    continue
+                for row in rows:
+                    row.file_key = ref
+                db.commit()
+                moved += 1
+            if not db.query(DataTable.id).filter(DataTable.session_id == session_id, DataTable.file_key.is_(None)).first():
+                _remove_file(source)
+    if moved:
+        logger.info("Moved the spreadsheet tables of %s document(s) to per-document files", moved)
+    return moved
+
+
+def sweep_table_cache(max_age_seconds: float = 3600) -> int:
+    """Delete cached copies of table files that no catalog row refers to any more (object storage only: with the local
+    backend these files *are* the storage). Files younger than ``max_age_seconds`` are left alone: they may belong to an
+    ingestion that has not committed yet."""
+    if storage.backend_name() != "s3" or not tables_dir().exists():
+        return 0
+    from ..db import SessionLocal
+    with SessionLocal() as db:
+        referenced = {ref for (ref,) in db.query(DataTable.file_key).filter(DataTable.file_key.isnot(None))}
+    now, removed = time.time(), 0
+    for path in tables_dir().rglob("*.sqlite"):
+        if path.name.startswith("view-") or path.parent == tables_dir():
+            continue   # views are derived; the legacy layout is not a cache
+        ref = storage.S3_SCHEME + path.relative_to(settings.data_dir).as_posix()
+        if ref not in referenced and now - path.stat().st_mtime > max_age_seconds:
+            _remove_file(path)
+            removed += 1
+    return removed
 
 
 def session_tables(db: Session, session_id: str) -> list[DataTable]:

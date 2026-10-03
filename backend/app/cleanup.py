@@ -5,10 +5,10 @@ undoes the delete: they are unreachable once their rows are gone, because every 
 """
 import logging
 import shutil
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from . import storage
 from .analytics import tablestore
 from .config import settings
 from .models import ChatSession, DocChunk, Document, Evidence, Job, UsageEvent
@@ -18,16 +18,13 @@ logger = logging.getLogger("mragrag")
 
 
 def _remove_files(documents: list[tuple[str, str]]) -> None:
-    for document_id, path in documents:
-        try:
-            Path(path).unlink(missing_ok=True)
-            shutil.rmtree(settings.data_dir / "converted" / document_id, ignore_errors=True)
-        except OSError as exc:
-            logger.warning("Could not remove the files of document %s: %s", document_id, exc)
+    for document_id, ref in documents:
+        storage.delete(ref)   # the upload, wherever it lives; failures are logged, never raised
+        shutil.rmtree(settings.data_dir / "converted" / document_id, ignore_errors=True)
 
 
 def delete_document(db: Session, document: Document, pipeline) -> None:
-    """Remove a document: its chunks, evidence, keyword-index entries, spreadsheet tables, vectors and uploaded file."""
+    """Remove a document: its chunks, evidence, keyword-index entries, spreadsheet tables, vectors and uploaded file (from disk or object storage)."""
     document_id, path = document.id, document.path
     fts.delete_document(db, document_id)
     tablestore.drop_document_tables(db, document_id)
