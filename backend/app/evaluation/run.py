@@ -33,6 +33,8 @@ def main(argv=None) -> int:
     # Settings are read when the app is imported, so decide the environment first.
     os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="knavis_eval_")
     os.environ["QDRANT_URL"] = ""
+    os.environ["STORAGE_BACKEND"] = "local"   # the synthetic corpus never goes to a real bucket or database, whatever .env holds
+    os.environ["DATABASE_URL"] = ""
     os.environ["AUTH_ENABLED"] = "true"
     for name in ("RATE_LIMIT_CHAT_PER_MINUTE", "RATE_LIMIT_UPLOAD_PER_MINUTE", "RATE_LIMIT_AUTH_PER_MINUTE"):
         os.environ[name] = "0"

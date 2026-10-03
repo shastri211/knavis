@@ -218,8 +218,8 @@ def test_spreadsheet_is_loaded_as_a_queryable_table_with_a_catalog(client, uploa
     assert job["status"] == "completed"
     [table] = document["details"]["tables"]
     assert table == {"name": CAMPAIGN_TABLE, "sheet": "Week1", "rows": 30, "columns": 5}
-    from app.analytics.tablestore import table_file
-    assert table_file(session_id).exists()
+    from conftest import table_files
+    assert len(table_files(session_id)) == 1
 
 
 def test_which_channel_had_the_highest_conversions_is_computed_not_guessed(llm, session_id, upload, ask):
@@ -350,7 +350,7 @@ def test_the_sheet_summary_is_still_searchable_as_text(llm, session_id, upload, 
 
 
 def test_deleting_a_document_drops_its_tables_index_rows_and_file(client, session_id, upload):
-    from app.analytics.tablestore import table_file
+    from conftest import table_files
     from app.db import SessionLocal
     from app.models import DataTable, DocChunk
     from app.retrieval import fts
@@ -360,7 +360,7 @@ def test_deleting_a_document_drops_its_tables_index_rows_and_file(client, sessio
         assert db.query(DataTable).filter(DataTable.session_id == session_id).count() == 0
         assert db.query(DocChunk).filter(DocChunk.document_id == document["id"]).count() == 0
         assert fts.search(db, session_id, "campaign channel", 5) == []
-    assert not table_file(session_id).exists()
+    assert not table_files(session_id)
     assert client.delete(f"/api/documents/{document['id']}").status_code == 404
 
 

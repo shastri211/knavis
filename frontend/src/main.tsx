@@ -21,6 +21,12 @@ const ACTIONS:Record<string,{label:string;action:string}[]> = {
   ocr_unavailable:[{label:"Retry OCR",action:"retry"}],
   audio_unavailable:[{label:"Retry",action:"retry"}],
 };
+// A very large document asks before spending the free embedding quota; skipping keeps it searchable by keywords only.
+const EMBEDDING_ACTIONS=[{label:"Embed all",action:"confirm"},{label:"Keyword only",action:"skip"}];
+// A document indexed without vectors (skipped as too large, or the vector store was down) can be indexed again later.
+const REINDEX=[{label:"Reindex",action:"reindex"}];
+const actionsFor=(d:any)=>d.status==="awaiting_confirmation"&&d.details?.pause?.kind==="embedding"?EMBEDDING_ACTIONS
+  :d.status==="indexed"&&(d.details?.embedding?.skipped||d.details?.embedding?.error)?REINDEX:ACTIONS[d.status];
 
 function App(){
   const [auth,setAuth]=useState<{enabled:boolean;registrationOpen:boolean;passwordReset:boolean;emailVerification:boolean}|null>(null);
@@ -218,9 +224,10 @@ function App(){
         <div className="doc-head"><b title={d.filename}>{d.filename}</b>
           <button className="icon" aria-label={`Remove ${d.filename}`} title="Remove document" onClick={()=>deleteDoc(d)}>×</button></div>
         <small className={`status status-${d.status}`}>{STATUS_LABEL[d.status]||d.status.replace(/_/g," ")}{d.details?.chunks!=null?` · ${d.details.chunks} chunks`:""}{d.details?.tables?.length?` · ${d.details.tables.length} table${d.details.tables.length>1?"s":""} for calculations`:""}</small>
-        {d.details?.pause?.message&&<small className="pause">{d.details.pause.message}</small>}
-        {d.details?.embedding?.error&&<small className="pause">Keyword search only: {d.details.embedding.hint}</small>}
-        {ACTIONS[d.status]&&<div className="doc-actions">{ACTIONS[d.status].map(a=><button key={a.action} onClick={()=>processDoc(d,a.action)}>{a.label}</button>)}</div>}
+        {d.details?.pause?.message&&d.details.pause.kind!=="embedding"&&<small className="pause">{d.details.pause.message}</small>}
+        {d.details?.pause?.kind==="embedding"&&<small className="pause">Large document: {d.details.chunks} passages, {d.details.pause.to_embed} still to embed in about {d.details.pause.requests} request{d.details.pause.requests===1?"":"s"} ({d.details.pause.cached} already cached) from the free embedding quota. Until you choose, it is searched by keywords only.</small>}
+        {(d.details?.embedding?.error||d.details?.embedding?.skipped)&&<small className="pause">Keyword search only: {d.details.embedding.hint}</small>}
+        {actionsFor(d)&&<div className="doc-actions">{actionsFor(d)!.map(a=><button key={a.action} onClick={()=>processDoc(d,a.action)}>{a.label}</button>)}</div>}
       </div>)}{active&&docs.length===0&&<small className="muted">Attach a file with 📎 to get started.</small>}</div>
       {user.email&&<div className="account">
         <small title={user.email}>{user.email}</small>

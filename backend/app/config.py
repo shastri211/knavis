@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     analytics_enabled:bool=True
     analytics_timeout_seconds:float=5.0     # a query running longer is cancelled
     analytics_max_rows:int=200              # rows a query may return
+    # Embedding spends the free embedding quota (32 chunks per request). A document that would need more than this many
+    # chunks embedded (chunks whose vectors are already cached cost nothing) waits for a yes; skipping keeps it keyword-only.
+    # 0 turns the check off.
+    max_embed_chunks_per_doc:int=1000
+    # Where uploaded files and spreadsheet table files are kept: "local" (the data directory) or "s3" (any S3-compatible
+    # object store, so several hosts can share them). Credentials may be left empty to use the AWS default chain (IAM roles).
+    storage_backend:str='local'
+    s3_bucket:str=''; s3_endpoint_url:str=''; s3_region:str=''; s3_access_key_id:str=''; s3_secret_access_key:str=''
+    s3_prefix:str=''                  # keys start with this, so one bucket can serve several installs
+    s3_path_style:bool=False          # http://host/bucket/key addressing, which most self-hosted servers need
+    s3_create_bucket:bool=False       # create the bucket at start-up when it does not exist
     # Hosted specialists (OCR, figure description, speech-to-text). Every *_provider setting is
     # "auto" (first configured provider in the documented order), a provider name, or "none".
     mistral_api_key:str=''; gemini_api_key:str=''

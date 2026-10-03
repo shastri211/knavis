@@ -136,7 +136,7 @@ def test_purging_removes_only_the_named_session_or_document(dense_pipeline):
 
 def test_deleting_a_session_removes_vectors_files_chunks_index_tables_and_history(client, llm, upload, ask, dense_pipeline, monkeypatch):
     from pathlib import Path
-    from app.analytics.tablestore import table_file
+    from conftest import table_files
     from app.config import settings
     from app.db import SessionLocal
     from app.integration.pipeline import get_pipeline
@@ -157,11 +157,11 @@ def test_deleting_a_session_removes_vectors_files_chunks_index_tables_and_histor
     with SessionLocal() as db:
         path = Path(db.get(Document, document["id"]).path)
     assert path.exists() and dense_pipeline.qdrant.count_session("knavis_chunks", session) >= 2
-    assert table_file(session).exists()
+    assert table_files(session)
 
     assert client.delete(f"/api/sessions/{session}").status_code == 204
 
-    assert not path.exists() and not table_file(session).exists()
+    assert not path.exists() and not table_files(session)
     assert dense_pipeline.qdrant.count_session("knavis_chunks", session) == 0
     assert dense_pipeline.qdrant.count_session("knavis_chunks", other) >= 1           # the other session is untouched
     assert _search(session, "retained") == [] and _search(other, "retention")

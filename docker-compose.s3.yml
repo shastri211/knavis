@@ -1,0 +1,38 @@
+# Optional overlay: keep uploads and spreadsheet table files in an S3-compatible object store instead of the data volume.
+#   S3_SECRET_ACCESS_KEY=choose-one docker compose -f docker-compose.yml -f docker-compose.s3.yml up --build
+#
+# This starts RustFS, a small self-hosted S3-compatible server, so the whole arrangement runs on one machine for trying it out.
+# For production, skip the `s3` service: set STORAGE_BACKEND=s3 and the S3_* settings (.env.example) to your own bucket on AWS S3,
+# Cloudflare R2, Backblaze B2 or another provider, and every host that runs KNAVIS reaches the same files.
+# With docker-compose.scale.yml, add docker-compose.s3.scale.yml as well so the ingestion workers use the bucket too.
+services:
+  s3:
+    image: rustfs/rustfs:1.0.1
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-knavis}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+    volumes:
+      - knavis-objects:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    # Not published: only the backend (and workers) reach it.
+
+  backend:
+    environment:
+      STORAGE_BACKEND: s3
+      S3_BUCKET: ${S3_BUCKET:-knavis}
+      S3_ENDPOINT_URL: http://s3:9000
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-knavis}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+      S3_PATH_STYLE: "true"
+      S3_CREATE_BUCKET: "true"
+    depends_on:
+      s3:
+        condition: service_healthy
+
+volumes:
+  knavis-objects:

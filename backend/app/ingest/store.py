@@ -11,7 +11,7 @@ from .chunker import ChunkData, build_chunks
 from .elements import OCR_TEXT, PARAGRAPH, RECORD, TABLE, TRANSCRIPT, Element
 from .extract import EXTRACTOR_VERSION
 
-_EMBED_BATCH = 32          # texts per embedding request
+EMBED_BATCH = 32           # texts per embedding request
 _IN_LIMIT = 500            # ids per SQL IN clause
 
 
@@ -147,6 +147,25 @@ def _embedding_key(model: str, input_type: str, text: str) -> str:
     return sha256_text(f"{model}\0{input_type}\0{text}")
 
 
+def _cached_ids(db: Session, keys: list[str]) -> set[str]:
+    found: set[str] = set()
+    for start in range(0, len(keys), _IN_LIMIT):
+        found.update(i for (i,) in db.query(EmbeddingCache.id).filter(EmbeddingCache.id.in_(keys[start:start + _IN_LIMIT])))
+    return found
+
+
+def estimate_embedding(db: Session, model: str, texts: list[str], input_type: str = "passage") -> dict:
+    """What embedding ``texts`` would cost: texts whose vector is already cached (or repeated) are free.
+
+    Returns ``{"chunks": n, "unique": n, "cached": n, "to_embed": n, "requests": n}``.
+    """
+    unique = list(dict.fromkeys(_embedding_key(model, input_type, t) for t in texts))
+    cached = len(_cached_ids(db, unique))
+    to_embed = len(unique) - cached
+    return {"chunks": len(texts), "unique": len(unique), "cached": cached, "to_embed": to_embed,
+            "requests": -(-to_embed // EMBED_BATCH)}
+
+
 async def embed_with_cache(db: Session, client, texts: list[str], input_type: str = "passage") -> tuple[list[list[float]], dict]:
     """Embed ``texts`` calling the provider only for texts never embedded before.
 
@@ -166,8 +185,8 @@ async def embed_with_cache(db: Session, client, texts: list[str], input_type: st
     text_of = dict(zip(keys, texts))
     missing = [k for k in unique if k not in found]
     requests = 0
-    for start in range(0, len(missing), _EMBED_BATCH):
-        batch = missing[start:start + _EMBED_BATCH]
+    for start in range(0, len(missing), EMBED_BATCH):
+        batch = missing[start:start + EMBED_BATCH]
         result = await client.embed([text_of[k] for k in batch], input_type=input_type)
         requests += 1
         for key, vector in zip(batch, result.vectors):

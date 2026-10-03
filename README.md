@@ -52,6 +52,12 @@ These are the parts that spend free-tier quota, so they are built to spend as li
 - **Big jobs ask first.** A file needing more than `CONFIRM_ABOVE_CALLS` hosted calls (default
   25) shows `awaiting_confirmation` with the estimate; **Process** runs it, **Skip** keeps just the
   text that is already searchable. Native text is indexed before any hosted call is made.
+- **Huge documents ask before embedding.** Dense search embeds 32 chunks per request, and a 20 MB text file makes about
+  17,000 chunks. A document that needs more than `MAX_EMBED_CHUNKS_PER_DOC` chunks embedded (default 1000; chunks whose
+  vectors are cached cost nothing, so a re-upload never asks) pauses as `awaiting_confirmation` with the estimate (passages,
+  requests) while it stays searchable by keyword. **Embed all** (`confirm`) embeds it; **Keyword only** (`skip`) indexes it
+  without vectors, and keyword search works as usual. The choice is stored with the job, so a restart or a quota wait does not
+  ask again, and **Reindex** starts over. `GET /api/quota` reports what is left of the embedding quota (`embedding`).
 - **Privacy:** Gemini's free tier uses submitted content to improve Google's products, so Gemini is
   never used unless you set `ALLOW_FREE_TIER_DATA_USE=true`. Check the data terms of every provider
   before sending sensitive documents.
@@ -96,8 +102,12 @@ Qdrant local storage is used only when NVIDIA embeddings are configured; set `QD
   `session_<id>` collection is moved into the shared one the first time it is used (same point ids, so an
   interrupted move is simply repeated), then the old collection is dropped.
 - **Deleting is complete.** `DELETE /api/sessions/{id}` removes messages, documents, chunks, keyword-index rows,
-  spreadsheet tables, vectors and the uploaded files; `DELETE /api/documents/{id}` does the same for one
-  document. A vector store that is down never blocks the delete (the rows go; the failure is logged).
+  spreadsheet tables, vectors and the uploaded files (from disk or from the bucket); `DELETE /api/documents/{id}` does the
+  same for one document, and deleting an account does it for every chat. A vector store or bucket that is down never blocks
+  the delete (the rows go; the failure is logged).
+- **Files can live in a bucket.** `STORAGE_BACKEND=s3` keeps uploads and spreadsheet table files in any S3-compatible object
+  store (`S3_*` settings), so several hosts share them; the default is the data directory, unchanged. Extraction reads a
+  temporary copy of the object. See `DEPLOYMENT.md`.
 - **Schema changes are additive.** Startup adds any new nullable model column to an existing database
   (`app/migrations.py`), which is how `messages.citations` appeared without a migration tool.
 
@@ -112,8 +122,9 @@ still asks the model to tell chat from a question about files that were never up
 ## Spreadsheet analytics
 
 Retrieval cannot compute, so "which channel had the highest number of conversions" or "total sales by region"
-used to abstain. Spreadsheets and CSV files are now also loaded, at ingestion, as real tables in a per-session
-SQLite file (`<data dir>/tables/<session>.sqlite`; no new dependency), with each sheet's real row numbers.
+used to abstain. Spreadsheets and CSV files are now also loaded, at ingestion, as real tables in a small SQLite file per
+document (`tables/<session>/<document>-<token>.sqlite`, kept through the storage backend and cached on each host that
+answers a question; no new dependency), with each sheet's real row numbers.
 
 An analytical question is recognised by rules (a total, average, count, "how many", highest/lowest, "by" or
 "per" a column, a numeric filter) *and* a match with a column, a value of a column or the table; with only
@@ -158,6 +169,8 @@ Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS`
 - **Several processes:** jobs are claimed with leases so several web processes and dedicated workers (`python -m app.worker`)
   share one database without running anything twice; rate limits can be shared through Redis (`REDIS_URL`); start-up is
   serialised. `docker-compose.scale.yml` runs the whole arrangement on one host.
+- **Several hosts:** with PostgreSQL, a Qdrant server, Redis and `STORAGE_BACKEND=s3`, nothing is left on a host's disk but
+  caches, so web processes and workers can run on different machines (`docker-compose.s3.yml` tries the object store locally).
 - **Optional extras:** ClamAV scanning of uploads (`CLAMAV_HOST`, `docker-compose.scan.yml`), password reset by e-mail
   (`SMTP_HOST`) and confirmation of new accounts' addresses (`REQUIRE_EMAIL_VERIFICATION`). Macros, embedded programs and PDF
   JavaScript are always refused unless `ALLOW_ACTIVE_CONTENT=true`.
@@ -168,7 +181,8 @@ Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS`
 ## Running in Docker
 
 `docker compose up --build` serves the app on http://127.0.0.1:8080 (nginx in front of the backend, data in a named
-volume). See `DEPLOYMENT.md` for exposing it safely and for the known limits.
+volume). See `DEPLOYMENT.md` for exposing it safely and for the known limits. Optional overlays add PostgreSQL, a worker
+fleet, ClamAV and an S3-compatible object store.
 
 ## Evaluation
 

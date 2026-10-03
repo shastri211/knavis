@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import settings
-from .tablestore import ROW_COLUMN, table_file
+from .tablestore import ROW_COLUMN, query_file
 
 MAX_SQL_CHARS = 2000
 
@@ -115,8 +115,8 @@ def run_select(session_id: str, sql, tables, *, max_rows: int | None = None, tim
     allowed = {   # table -> {lower-case column -> real name}; the real names are what gets cited
         t.table_name.lower(): {c["name"].lower(): c["name"] for c in t.columns_json} | {ROW_COLUMN: ROW_COLUMN} for t in tables
     }
-    path = table_file(session_id)
-    if not allowed or not path.exists():
+    path = query_file(session_id) if allowed else None
+    if not allowed or path is None:
         raise SqlRejected("There are no spreadsheet tables to query in this chat.")
     _check_quoted_names(sql, set(allowed) | {c for cols in allowed.values() for c in cols})
 

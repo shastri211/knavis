@@ -66,8 +66,80 @@ python -m app.admin copy-database postgresql://user:password@host:5432/knavis
 ```
 
 copies every row (it refuses a database that already has data), and after you set `DATABASE_URL` and restart, the keyword
-index rebuilds itself. Uploaded files, spreadsheet tables and vectors stay where they are (data directory, Qdrant). CI runs
-the whole test suite on PostgreSQL as well as SQLite.
+index rebuilds itself. Uploaded files, spreadsheet tables and vectors stay where they are (data directory, Qdrant; to move the
+files to a bucket see "Object storage"). CI runs the whole test suite on PostgreSQL as well as SQLite.
+
+## Large documents and the embedding quota
+
+Dense search embeds 32 chunks per request against the free embedding quota. A 20 MB text file makes about 17,000 chunks, which
+would be over 500 requests, so `MAX_EMBED_CHUNKS_PER_DOC` (default 1000, 0 turns it off) caps what one document may spend
+without asking. The check counts chunks that still need embedding: text whose vector is cached (the same file uploaded again,
+or repeated passages) is free.
+
+A document over the limit stops as `awaiting_confirmation` after its text is saved (it is searchable by keyword at once) and
+shows how many passages and requests it would take. `POST /api/documents/{id}/process` with `confirm` embeds everything; `skip`
+indexes it without vectors (its details show `embedding.skipped`), and `reindex` asks again later. The decision belongs to the
+job: it survives a restart, and a quota wait followed by `retry` does not ask a second time. Hosted OCR or transcription has its
+own question (`CONFIRM_ABOVE_CALLS`); a document can be asked both, one after the other. `GET /api/quota` shows used and remaining
+requests per provider and an `embedding` summary (remaining requests and chunks, the per-document limit). The built-in
+per-minute limits are placeholders; set your own account's real ones with `QUOTA_OVERRIDES`.
+
+## Object storage (optional)
+
+By default uploads (`<data dir>/uploads`) and spreadsheet table files (`<data dir>/tables`) are on the host's disk, which only one
+host can use. With an S3-compatible object store they can be shared, so web processes and workers may run on different machines:
+
+```bash
+STORAGE_BACKEND=s3
+S3_BUCKET=knavis
+S3_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com   # empty for AWS S3
+S3_ACCESS_KEY_ID=...                                         # both empty: the AWS default credential chain (IAM role)
+S3_SECRET_ACCESS_KEY=...
+S3_PATH_STYLE=false                                          # true for most self-hosted servers
+S3_PREFIX=knavis                                             # optional: several installs in one bucket
+```
+
+Any provider that speaks the S3 API works (AWS S3, Cloudflare R2, Backblaze B2, or a server you run). `S3_CREATE_BUCKET=true`
+creates a missing bucket at start-up, and `python scripts/check_config.py --online` reports whether the bucket is reachable. Keep the bucket private: KNAVIS reads and writes it with its own credentials and never
+hands out object URLs.
+
+- **How files are referenced.** `documents.path` holds `s3:<key>` for an object and a disk path for anything else, so documents
+  uploaded before the switch keep working from the host that has them. `python -m app.admin migrate-storage` (add
+  `--delete-local` to remove the copies) uploads those files and rewrites their references; it can be repeated.
+- **Extraction** downloads the object to a temporary directory for the length of the job and removes it afterwards.
+  Converted copies of legacy Office files are scratch space too.
+- **Spreadsheet tables** are one SQLite file per document, stored as an object whose key changes on every write
+  (`tables/<chat>/<document>-<token>.sqlite`). The host that answers a question downloads the files it needs once and caches
+  them in `<data dir>/tables`; because a key is never overwritten, a cached copy cannot be stale. Several spreadsheets in a chat
+  are merged into one local view file for the query. Cached files that nothing refers to are removed at start-up after an hour.
+  An install from before this layout (one file per chat) is split into per-document files at its first start.
+- **Deleting** a document, a chat or an account deletes its objects (uploads and table files, plus strays under the chat's
+  prefix). A bucket that is unreachable never blocks the delete: the rows go and the failure is logged. While it is unreachable,
+  uploads answer 503, and start-up logs `Object storage is not usable` instead of refusing to start.
+- **Costs.** Every upload is one `PUT`, every ingestion one `GET`, and a host's first spreadsheet question fetches the table
+  file. Check your provider's free allowance (R2 and B2 have one) against your traffic.
+
+To try it on one machine, `docker-compose.s3.yml` adds RustFS, a small self-hosted S3-compatible server, and points the backend at it:
+
+```bash
+S3_SECRET_ACCESS_KEY=choose-one docker compose -f docker-compose.yml -f docker-compose.s3.yml up --build
+# with the worker fleet, add: -f docker-compose.scale.yml -f docker-compose.s3.scale.yml (and POSTGRES_PASSWORD)
+```
+
+The bundled server is for trying the arrangement and for CI; for production use a managed bucket (skip the overlay and set the
+variables above). MinIO is not used because its project stopped publishing images and was archived in 2026.
+
+The storage tests run the upload, ingest, delete and analytics flows on the disk and on a bucket; the bucket half needs a server and
+is skipped without one. To run it locally:
+
+```bash
+docker run -d --name knavis-s3-test -p 19000:9000 -e RUSTFS_ACCESS_KEY=knavisdev -e RUSTFS_SECRET_KEY=knavisdev-secret rustfs/rustfs:1.0.1
+cd backend && TEST_S3_ENDPOINT=http://127.0.0.1:19000 python -m pytest -q tests/test_object_storage.py
+```
+
+(`TEST_S3_ACCESS_KEY` and `TEST_S3_SECRET_KEY` override the keys.) CI starts the same image as a service container for both the
+SQLite and the PostgreSQL test jobs, and a separate job builds the object-storage overlay, uploads through the proxy and checks
+the bucket (`scripts/smoke_object_storage.sh`).
 
 ## Virus scanning (optional)
 
@@ -124,7 +196,7 @@ runs two web processes and two dedicated ingestion workers (`python -m app.worke
   do not collide on migrations.
 - **Vectors** use a Qdrant server (`QDRANT_URL`); the default on-disk Qdrant belongs to a single process.
 - **Uploads and spreadsheet tables** live in the data volume, which every backend and worker mounts. That works on one host;
-  spreading across hosts needs a shared filesystem or object storage, which this project does not provide.
+  for several hosts use object storage (see "Object storage": `docker-compose.s3.yml`, `docker-compose.s3.scale.yml`).
 
 Verified with this stack: eight uploads through nginx were all indexed with each job run exactly once across two workers, and
 the sign-in limit was shared by the two web processes (429 after the fifth failed attempt in total, not per process).
@@ -140,7 +212,7 @@ The compose file binds to `127.0.0.1` on purpose. To serve other people:
 3. Decide who may register: leave `ALLOW_REGISTRATION=true` while people sign up, then set it to `false`.
 4. Review the limits in `.env.example` (`RATE_LIMIT_*`, `MAX_USER_STORAGE_MB`, `MAX_UPLOAD_MB`) against your disk and the
    free-tier quotas of your providers. Every signed-in user spends the same provider keys.
-5. Back up the `knavis-data` volume (it is the whole application state).
+5. Back up the `knavis-data` volume (it is the whole application state, apart from a bucket or PostgreSQL if you use them).
 
 ## What is in place
 
@@ -157,10 +229,10 @@ The compose file binds to `127.0.0.1` on purpose. To serve other people:
 
 These are real and deliberate for a free-tier, single-host design:
 
-- **One host.** The default setup is one process (on-disk Qdrant and an in-process rate limiter). The scale overlay shares
-  work between processes on one host; uploads and spreadsheet tables live in a data volume that all of them mount, so
-  spreading across hosts needs a shared filesystem or object storage that this project does not provide. Back up the data
-  directory as well as the database.
+- **One host by default.** The default setup is one process (on-disk Qdrant and an in-process rate limiter). The scale overlay
+  shares work between processes on one host through the data volume. Spreading across hosts needs PostgreSQL, a Qdrant server,
+  Redis and `STORAGE_BACKEND=s3`. That arrangement is tested piece by piece (storage on a real S3 server, jobs and rate limits on
+  one host), not as a multi-machine deployment. Back up the bucket (or the data directory) as well as the database.
 - **Malware scanning is opt-in.** The built-in active-content checks are always on, but recognising known malware needs
   ClamAV (a signature scanner, about 1 GB of memory and a signature download), so it stays optional. Signatures do not catch
   novel malware, and a scanner does not make a hostile document safe to open elsewhere.

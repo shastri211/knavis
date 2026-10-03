@@ -40,6 +40,10 @@ The run uses a temporary data directory and its own throwaway account; it never 
 
 Cases that need embeddings are reported as skipped, not passed.
 
+The corpus is a few dozen small chunks, far below `MAX_EMBED_CHUNKS_PER_DOC`, so the embedding limit never pauses an evaluation
+document and live runs embed everything they would have embedded before. The storage backend does not matter either: the run
+forces `STORAGE_BACKEND=local`, an empty `DATABASE_URL` and a temporary data directory, so the synthetic corpus never reaches a real bucket or database whatever `.env` holds.
+
 ## Live metrics
 
 `answer_accuracy` (every required fact present, nothing forbidden), `answered_rate`, `citation_rate`,
