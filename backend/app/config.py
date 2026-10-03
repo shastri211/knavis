@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     evidence_min_dense:float=0.35; evidence_min_coverage:float=0.5; evidence_max_items:int=8
     # Upload safety. A small file can still describe a huge one, so archives, PDFs and images are checked first.
     max_archive_entries:int=5000
+    # Macros, embedded programs and PDF JavaScript are refused by default. KNAVIS only reads documents' text and never runs
+    # anything in them, but a file with active content is a poor thing to keep and pass on.
+    allow_active_content:bool=False
     max_unpacked_mb:int=500
     max_pdf_pages:int=1000
     max_image_megapixels:int=100
@@ -42,6 +45,9 @@ class Settings(BaseSettings):
     smtp_host:str=''; smtp_port:int=587; smtp_user:str=''; smtp_password:str=''; smtp_from:str=''; smtp_starttls:bool=True
     public_url:str=''
     reset_token_minutes:int=60
+    # New accounts must confirm their e-mail address before they can sign in. Needs SMTP (otherwise it has no effect).
+    require_email_verification:bool=False
+    verification_token_hours:int=48
     # Several processes may share one database. A job is held with a lease the owner keeps renewing; if the owner dies
     # the lease runs out and another process takes the job over. INGESTION_INLINE=false leaves all processing to
     # dedicated workers (python -m app.worker); the default runs jobs in the process that received the upload too.

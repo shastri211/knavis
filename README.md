@@ -158,8 +158,9 @@ Settings: `ANALYTICS_ENABLED`, `ANALYTICS_TIMEOUT_SECONDS`, `ANALYTICS_MAX_ROWS`
 - **Several processes:** jobs are claimed with leases so several web processes and dedicated workers (`python -m app.worker`)
   share one database without running anything twice; rate limits can be shared through Redis (`REDIS_URL`); start-up is
   serialised. `docker-compose.scale.yml` runs the whole arrangement on one host.
-- **Optional extras:** ClamAV scanning of uploads (`CLAMAV_HOST`, `docker-compose.scan.yml`) and password reset by e-mail
-  (`SMTP_HOST`).
+- **Optional extras:** ClamAV scanning of uploads (`CLAMAV_HOST`, `docker-compose.scan.yml`), password reset by e-mail
+  (`SMTP_HOST`) and confirmation of new accounts' addresses (`REQUIRE_EMAIL_VERIFICATION`). Macros, embedded programs and PDF
+  JavaScript are always refused unless `ALLOW_ACTIVE_CONTENT=true`.
 - **Migrations:** the schema is managed by Alembic and upgraded at start-up; installs from before Alembic are adopted
   with their data. **PostgreSQL** is supported (`DATABASE_URL`, or the `docker-compose.postgres.yml` overlay) with
   `python -m app.admin copy-database` to move an existing SQLite install. See `DEPLOYMENT.md`.

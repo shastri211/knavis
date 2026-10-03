@@ -34,6 +34,12 @@ _IMAGE_SIGNATURES = {
 _FOREIGN = (b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe", b"%PDF", b"PK\x03\x04", _OLE, b"\x89PNG", b"\xff\xd8\xff")
 
 
+_PROGRAM_SUFFIXES = (".exe", ".dll", ".scr", ".com", ".bat", ".cmd", ".msi", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".ps1",
+                     ".jar", ".lnk", ".hta", ".cpl", ".sys")
+_PDF_ACTIVE_RE = re.compile(r"/(JavaScript|JS|Launch)\b")
+_OLE_MACRO_MARKER = "_VBA_PROJECT".encode("utf-16-le")      # a macro project's directory entry in a legacy Office file
+
+
 class UploadTooLarge(GuardrailError):
     """Maps to HTTP 413."""
 
@@ -109,6 +115,13 @@ def check_archive(raw: bytes) -> None:
     packed = max(1, sum(e.compress_size for e in entries))
     if unpacked > settings.max_unpacked_mb * 1024 * 1024 or (unpacked > 50 * 1024 * 1024 and unpacked / packed > 150):
         raise GuardrailError("This file expands to an unsafe size and was refused.")
+    if not settings.allow_active_content:
+        names = [e.filename.lower() for e in entries]
+        if any(n.endswith("vbaproject.bin") or n.startswith(("basic/", "scripts/")) for n in names):
+            raise GuardrailError("This document contains macros, which are not accepted. Save a copy without macros "
+                                 "(for example as a plain .docx or .xlsx) and upload that.")
+        if any(n.endswith(_PROGRAM_SUFFIXES) for n in names):
+            raise GuardrailError("This document has a program embedded in it, which is not accepted.")
 
 
 def check_pdf(raw: bytes) -> None:
@@ -120,6 +133,22 @@ def check_pdf(raw: bytes) -> None:
         raise GuardrailError("This PDF could not be read; it may be corrupted.") from exc
     if pages > settings.max_pdf_pages:
         raise GuardrailError(f"This PDF has {pages} pages; the limit is {settings.max_pdf_pages}.")
+    if not settings.allow_active_content and _pdf_has_active_content(raw):
+        raise GuardrailError("This PDF contains JavaScript or launch actions, which are not accepted. "
+                             "Print it to a new PDF without them and upload that.")
+
+
+def _pdf_has_active_content(raw: bytes) -> bool:
+    """JavaScript and launch actions, looked for in every PDF object (including those inside compressed object streams)."""
+    import fitz
+    with fitz.open(stream=raw, filetype="pdf") as pdf:
+        for xref in range(1, min(pdf.xref_length(), 200_000)):
+            try:
+                if _PDF_ACTIVE_RE.search(pdf.xref_object(xref, compressed=True)):
+                    return True
+            except Exception:   # an unreadable object is not evidence of anything
+                continue
+    return False
 
 
 def check_image(raw: bytes) -> None:
@@ -145,6 +174,8 @@ def inspect_upload(filename: str, raw: bytes) -> None:
     head = raw[:4096]
     if not _signature_ok(fmt.kind, ext, head):
         raise GuardrailError(f"The content of this file does not match its {ext} extension.")
+    if head.startswith(_OLE) and not settings.allow_active_content and _OLE_MACRO_MARKER in raw:
+        raise GuardrailError("This document contains macros, which are not accepted. Save a copy without macros and upload that.")
     if fmt.kind not in ("pdf", "docx", "pptx", "xlsx", "image", "audio"):
         _check_text(head, ext)
     if fmt.kind == "pdf":

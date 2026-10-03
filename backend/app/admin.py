@@ -13,6 +13,7 @@ Run it where the data lives (in Docker: ``docker compose exec backend python -m 
 import argparse
 import getpass
 import sys
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -59,7 +60,7 @@ def create_user(db: Session, email: str, password: str) -> User:
     if db.query(User.id).filter(User.email == email).first():
         raise AdminError(f"{email} already has an account.")
     _checked(check_new_password, password, email)
-    user = User(email=email, password_hash=hash_password(password))
+    user = User(email=email, password_hash=hash_password(password), email_verified_at=datetime.now(timezone.utc))   # the operator vouches for it
     db.add(user)
     db.commit()
     return user

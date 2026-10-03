@@ -88,6 +88,25 @@ Set `SMTP_HOST`, `SMTP_FROM` (and `SMTP_USER`/`SMTP_PASSWORD`, `SMTP_PORT`, `SMT
 after `RESET_TOKEN_MINUTES`, only the newest works, and the answer is identical for unknown addresses. Resetting ends every
 sign-in of the account. Without SMTP the link is not offered and the operator CLI is the way.
 
+## Confirming new accounts' e-mail addresses (optional)
+
+With SMTP configured (see above), set `REQUIRE_EMAIL_VERIFICATION=true`. A new account is created but cannot sign in until
+its owner opens the link we mail (it works once, expires after `VERIFICATION_TOKEN_HOURS`, and opening it signs them in).
+Signing in earlier gets a clear message and a "send the link again" button; asking again is rate-limited and answers the same for
+unknown and already-confirmed addresses. A password-reset link also confirms the address. Accounts that already exist when you
+turn this on are treated as confirmed (they were migrated with a confirmation date), and accounts created by an operator with
+`python -m app.admin create-user` are confirmed from the start. Chats from before accounts existed go to the first *confirmed*
+account, so someone who registers first with an address they do not own cannot take them. Without SMTP the setting has no effect.
+
+## Built-in checks for active content (always on)
+
+Independent of any scanner, every upload is refused if it contains **macros** (Office `vbaProject.bin`, OpenDocument `Basic/`,
+legacy Office macro projects), an **embedded program** (`.exe`, `.dll`, `.ps1`, `.jar`, `.lnk` ... inside an Office or
+OpenDocument file), or a **PDF with JavaScript or launch actions** (looked for inside compressed PDF objects too). The message
+tells the person how to save a clean copy. KNAVIS only reads text and never runs anything in a document, so this is about not
+storing and passing on risky files; set `ALLOW_ACTIVE_CONTENT=true` to turn it off. These checks are structural and cannot
+recognise known malware, which is what ClamAV (below) adds.
+
 ## Scaling beyond one process (one host)
 
 ```bash
@@ -142,8 +161,10 @@ These are real and deliberate for a free-tier, single-host design:
   work between processes on one host; uploads and spreadsheet tables live in a data volume that all of them mount, so
   spreading across hosts needs a shared filesystem or object storage that this project does not provide. Back up the data
   directory as well as the database.
-- **Scanning is opt-in.** ClamAV catches known malware by signature; it does not make a hostile document safe to open elsewhere.
-  There is no e-mail verification of new accounts (only password reset by e-mail, when SMTP is set).
+- **Malware scanning is opt-in.** The built-in active-content checks are always on, but recognising known malware needs
+  ClamAV (a signature scanner, about 1 GB of memory and a signature download), so it stays optional. Signatures do not catch
+  novel malware, and a scanner does not make a hostile document safe to open elsewhere.
+- **E-mail confirmation is optional** and needs SMTP; without it, anyone can register with any address.
 - **Lexical evidence gate.** Plausible-sounding questions the documents cannot answer can still reach the model, which
   is then told to abstain. `python -m app.evaluation.run` measures this (see `eval/README.md`).
 - **Free-tier terms.** Providers change limits, models and data terms without notice; check them before sending

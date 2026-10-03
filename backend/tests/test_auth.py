@@ -211,7 +211,7 @@ def test_with_accounts_switched_off_the_app_is_single_user(anonymous, monkeypatc
     monkeypatch.setattr(settings, "auth_enabled", False)
     sid = anonymous.post("/api/sessions", json={"title": "local"}).json()["id"]
     assert sid in [s["id"] for s in anonymous.get("/api/sessions").json()]
-    assert anonymous.get("/api/auth/config").json() == {"auth_enabled": False, "registration_open": False, "password_reset": False}
+    assert anonymous.get("/api/auth/config").json() == {"auth_enabled": False, "registration_open": False, "password_reset": False, "email_verification": False}
     assert anonymous.post("/api/auth/register", json=CREDS).status_code == 400
 
 

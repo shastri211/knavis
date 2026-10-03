@@ -197,3 +197,74 @@ def test_a_user_cannot_exceed_their_storage_allowance_but_another_user_can_uploa
     assert 413 in results
     assert post(other_client, other, "fine.txt", b"small file from someone else", "text/plain").status_code == 200
     assert already >= 0
+
+
+# ---- active content: macros, embedded programs, PDF JavaScript (always checked, no scanner needed) -------------
+
+def docx_plus(entry, data=b"payload"):
+    """A genuine .docx with one extra part added to the archive."""
+    import io
+    import zipfile
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(make_docx())) as source, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            target.writestr(item, source.read(item.filename))
+        target.writestr(entry, data)
+    return out.getvalue()
+
+
+def pdf_with(action):
+    import fitz
+    pdf = fitz.open()
+    pdf.new_page().insert_text((72, 72), "A harmless looking page")
+    pdf.xref_set_key(pdf.pdf_catalog(), "OpenAction", action)
+    data = pdf.tobytes(deflate=True, use_objstms=1)         # objects packed into compressed streams, as real PDFs often are
+    pdf.close()
+    return data
+
+
+DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@pytest.mark.parametrize("entry", ["word/vbaProject.bin", "xl/vbaProject.bin", "ppt/vbaProject.bin"])
+def test_a_document_with_macros_is_refused_with_advice(entry, client, session_id):
+    response = post(client, session_id, "report.docx", docx_plus(entry), DOCX_TYPE)
+    assert response.status_code == 400 and "macros" in response.json()["detail"]
+    assert client.get(f"/api/sessions/{session_id}/documents").json() == []
+
+
+def test_a_document_with_an_embedded_program_is_refused(client, session_id):
+    for name in ("word/embeddings/setup.exe", "word/embeddings/run.ps1", "word/embeddings/a.JAR"):
+        assert post(client, session_id, "report.docx", docx_plus(name), DOCX_TYPE).status_code == 400, name
+
+
+def test_open_document_macros_are_refused_too(client, session_id):
+    odt = zip_bytes([("mimetype", "application/vnd.oasis.opendocument.text"), ("content.xml", "<office:document-content/>"),
+                     ("Basic/script-lc.xml", "<script/>")])
+    response = post(client, session_id, "report.odt", odt)
+    assert response.status_code == 400 and "macros" in response.json()["detail"]
+
+
+def test_a_legacy_office_file_with_a_macro_project_is_refused(client, session_id):
+    ole = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 600 + "_VBA_PROJECT".encode("utf-16-le") + b"\x00" * 100
+    response = post(client, session_id, "old.xls", ole)
+    assert response.status_code == 400 and "macros" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("action", [r"<</S/JavaScript/JS(app.alert\(1\))>>", r"<</S/Launch/F(calc.exe)>>"])
+def test_a_pdf_with_javascript_or_a_launch_action_is_refused_even_inside_compressed_objects(action, client, session_id):
+    response = post(client, session_id, "form.pdf", pdf_with(action), "application/pdf")
+    assert response.status_code == 400 and "JavaScript or launch" in response.json()["detail"]
+
+
+def test_ordinary_documents_and_pdfs_are_not_mistaken_for_active_content(client, session_id):
+    assert post(client, session_id, "plain.docx", docx_plus("word/media/image1.png", b"\x89PNG"), DOCX_TYPE).status_code == 200
+    assert post(client, session_id, "plain.pdf", make_pdf(), "application/pdf").status_code == 200
+    assert post(client, session_id, "notes.txt", b"We discuss the JavaScript course and Launch plans.", "text/plain").status_code == 200
+
+
+def test_active_content_can_be_allowed_explicitly(client, session_id, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "allow_active_content", True)
+    assert post(client, session_id, "macro.docx", docx_plus("word/vbaProject.bin"), DOCX_TYPE).status_code == 200
+    assert post(client, session_id, "js.pdf", pdf_with(r"<</S/JavaScript/JS(app.alert\(1\))>>"), "application/pdf").status_code == 200
