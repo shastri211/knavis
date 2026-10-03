@@ -198,7 +198,7 @@ def test_the_first_account_claims_chats_that_predate_accounts(tmp_path):
         " t2 = c.post('/api/auth/register', json={'email': 'second@example.com', 'password': 'long enough password'}).json()['token']\n"
         " print('SECOND', c.get('/api/sessions', headers={'Authorization': 'Bearer ' + t2}).json())\n"
     )
-    env = {**os.environ, "DATA_DIR": str(data), "PYTHONPATH": str(Path(__file__).parents[1])}
+    env = {**os.environ, "DATA_DIR": str(data), "DATABASE_URL": "", "PYTHONPATH": str(Path(__file__).parents[1])}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path))
     assert out.returncode == 0, out.stderr[-800:]
     assert "FIRST ['old-chat']" in out.stdout and "SECOND []" in out.stdout
@@ -211,7 +211,7 @@ def test_with_accounts_switched_off_the_app_is_single_user(anonymous, monkeypatc
     monkeypatch.setattr(settings, "auth_enabled", False)
     sid = anonymous.post("/api/sessions", json={"title": "local"}).json()["id"]
     assert sid in [s["id"] for s in anonymous.get("/api/sessions").json()]
-    assert anonymous.get("/api/auth/config").json() == {"auth_enabled": False, "registration_open": False}
+    assert anonymous.get("/api/auth/config").json() == {"auth_enabled": False, "registration_open": False, "password_reset": False, "email_verification": False}
     assert anonymous.post("/api/auth/register", json=CREDS).status_code == 400
 
 

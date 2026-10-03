@@ -1,0 +1,32 @@
+# Optional overlay: scan every upload for viruses with ClamAV before it is stored.
+#   docker compose -f docker-compose.yml -f docker-compose.scan.yml up --build
+# The first start downloads the virus signatures (a minute or two); uploads are refused until the scanner is ready
+# (CLAMAV_REQUIRED=true), so nothing is ever accepted unscanned.
+services:
+  clamav:
+    image: clamav/clamav:stable
+    environment:
+      # clamd refuses streams over StreamMaxLength (25M by default); keep it above MAX_UPLOAD_MB.
+      CLAMD_CONF_StreamMaxLength: 100M
+      CLAMD_CONF_MaxFileSize: 100M
+    volumes:
+      - knavis-clamav:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+    # Not published: only the backend reaches it.
+
+  backend:
+    environment:
+      CLAMAV_HOST: clamav
+      CLAMAV_REQUIRED: "true"
+    depends_on:
+      clamav:
+        condition: service_healthy
+
+volumes:
+  knavis-clamav:

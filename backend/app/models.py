@@ -26,6 +26,10 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(30), default='queued')
     progress: Mapped[int] = mapped_column(Integer, default=0)
     stage: Mapped[str] = mapped_column(String(80), default='queued')
+    mode: Mapped[str|None] = mapped_column(String(20), nullable=True)        # auto | confirmed | native_only
+    attempts: Mapped[int|None] = mapped_column(Integer, nullable=True)       # times the job was started
+    locked_by: Mapped[str|None] = mapped_column(String(80), nullable=True)   # the worker running it (see app.job_runner)
+    locked_until: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)   # its lease; expires if the worker dies
     error: Mapped[str|None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -120,6 +124,7 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(300))
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # NULL: not confirmed
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -130,3 +135,23 @@ class AuthToken(Base):
     user_id: Mapped[str] = mapped_column(String(36), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordReset(Base):
+    """A single-use, expiring password-reset link. Only the SHA-256 of the token is stored."""
+    __tablename__ = 'password_resets'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EmailVerification(Base):
+    """A single-use, expiring link that proves someone controls an account's e-mail address (only its hash is stored)."""
+    __tablename__ = 'email_verifications'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

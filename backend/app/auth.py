@@ -17,13 +17,14 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from .models import AuthToken, ChatSession, Document, Job, User
+from . import mailer
+from .models import AuthToken, ChatSession, Document, EmailVerification, Job, PasswordReset, User
 from .ratelimit import client_address, enforce
 
 logger = logging.getLogger("mragrag")
@@ -140,11 +141,69 @@ class DeleteAccount(BaseModel):
     password: str
 
 
-def _normalise_email(email: str) -> str:
+class Forgot(BaseModel):
+    email: str
+
+
+class Reset(BaseModel):
+    token: str
+    new_password: str
+
+
+class Verify(BaseModel):
+    token: str
+
+
+class Resend(BaseModel):
+    email: str
+
+
+class ChangePassword(BaseModel):
+    current_password: str
+    new_password: str
+
+
+def normalise_email(email: str) -> str:
     email = (email or "").strip().lower()
     if len(email) > 254 or not _EMAIL_RE.match(email):
         raise HTTPException(400, "Enter a valid email address.")
     return email
+
+
+def check_new_password(password: str, email: str) -> None:
+    if not MIN_PASSWORD <= len(password or "") <= MAX_PASSWORD:
+        raise HTTPException(400, f"Use a password of {MIN_PASSWORD} to {MAX_PASSWORD} characters.")
+    if password.lower() == email:
+        raise HTTPException(400, "The password must not be your email address.")
+
+
+def verification_required() -> bool:
+    """Confirming the e-mail address is only enforced when it can work: accounts on, SMTP configured, setting on."""
+    return settings.auth_enabled and settings.require_email_verification and mailer.configured()
+
+
+def _claim_legacy_chats(db: Session, user: User) -> None:
+    """Chats created before accounts existed belong to the first person (confirmed, if confirmation is required) to join."""
+    others = db.query(User.id).filter(User.id != user.id)
+    if verification_required():
+        others = others.filter(User.email_verified_at.isnot(None))
+    if others.first() is None:
+        claimed = db.query(ChatSession).filter(ChatSession.user_id.is_(None)).update({"user_id": user.id})
+        if claimed:
+            logger.info("The first account claimed %s existing chats", claimed)
+
+
+def _mail_verification(db: Session, user: User, request: Request, background: BackgroundTasks) -> None:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    db.query(EmailVerification).filter(EmailVerification.user_id == user.id, EmailVerification.used_at.is_(None)).delete()
+    db.add(EmailVerification(id=_digest(token), user_id=user.id, expires_at=now + timedelta(hours=settings.verification_token_hours)))
+    db.commit()
+    base = (settings.public_url or str(request.base_url)).rstrip("/")
+    background.add_task(mailer.send_quietly, user.email, "Confirm your KNAVIS account",
+                        f"Open this link to confirm your e-mail address and finish creating your KNAVIS account "
+                        f"(it works once and expires in {settings.verification_token_hours} hours):\n\n{base}/#verify={token}\n\n"
+                        "If you did not sign up, ignore this message and no account will be used.")
 
 
 def _session_out(db: Session, user: User) -> dict:
@@ -154,31 +213,30 @@ def _session_out(db: Session, user: User) -> dict:
 @router.get("/config")
 def auth_config():
     """What the sign-in screen needs to know before anyone is signed in."""
-    return {"auth_enabled": settings.auth_enabled, "registration_open": settings.auth_enabled and settings.allow_registration}
+    return {"auth_enabled": settings.auth_enabled, "registration_open": settings.auth_enabled and settings.allow_registration,
+            "password_reset": settings.auth_enabled and mailer.configured(), "email_verification": verification_required()}
 
 
 @router.post("/register", status_code=201)
-def register(body: Credentials, request: Request, db: Session = Depends(get_db)):
+def register(body: Credentials, request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
     if not settings.auth_enabled:
         raise HTTPException(400, "Accounts are turned off on this server.")
     if not settings.allow_registration:
         raise HTTPException(403, "Registration is closed on this server.")
     enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
-    email = _normalise_email(body.email)
-    if not MIN_PASSWORD <= len(body.password) <= MAX_PASSWORD:
-        raise HTTPException(400, f"Use a password of {MIN_PASSWORD} to {MAX_PASSWORD} characters.")
-    if body.password.lower() == email:
-        raise HTTPException(400, "The password must not be your email address.")
+    email = normalise_email(body.email)
+    check_new_password(body.password, email)
     if db.query(User.id).filter(User.email == email).first():
         raise HTTPException(409, "An account with this email already exists.")
-    first = db.query(User.id).first() is None
+    required = verification_required()
     user = User(email=email, password_hash=hash_password(body.password))
     db.add(user)
     db.flush()
-    if first:   # chats created before accounts existed belong to whoever sets the server up
-        claimed = db.query(ChatSession).filter(ChatSession.user_id.is_(None)).update({"user_id": user.id})
-        if claimed:
-            logger.info("The first account claimed %s existing chats", claimed)
+    if required:
+        db.commit()   # the account exists but cannot sign in until the link in the e-mail is opened
+        _mail_verification(db, user, request, background)
+        return {"verification_required": True, "email": email}
+    _claim_legacy_chats(db, user)
     db.commit()
     return _session_out(db, user)
 
@@ -194,7 +252,40 @@ def login(body: Credentials, request: Request, db: Session = Depends(get_db)):
     ok = verify_password(body.password or "", user.password_hash if user else _DUMMY_HASH)
     if not user or not ok:
         raise HTTPException(401, "Incorrect email or password.")
+    if verification_required() and user.email_verified_at is None:
+        raise HTTPException(403, "Please confirm your e-mail address first. Open the link we sent, or ask for it again.")
     return _session_out(db, user)
+
+
+@router.post("/verify")
+def verify_email(body: Verify, request: Request, db: Session = Depends(get_db)):
+    """Confirm an e-mail address with the link from the message, and sign in."""
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    row = db.get(EmailVerification, _digest(body.token or ""))
+    now = datetime.now(timezone.utc)
+    expires = row.expires_at.replace(tzinfo=timezone.utc) if row and row.expires_at.tzinfo is None else (row.expires_at if row else None)
+    user = db.get(User, row.user_id) if row and row.used_at is None and expires > now else None
+    if not user:
+        raise HTTPException(400, "This confirmation link is invalid or has expired. Ask for a new one.")
+    row.used_at = now
+    user.email_verified_at = user.email_verified_at or now
+    _claim_legacy_chats(db, user)
+    db.commit()
+    return _session_out(db, user)
+
+
+@router.post("/resend", status_code=202)
+def resend_verification(body: Resend, request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    """Mail the confirmation link again. The answer is the same whether or not the address has an unconfirmed account."""
+    if not verification_required():
+        raise HTTPException(501, "E-mail confirmation is not turned on for this server.")
+    email = (body.email or "").strip().lower()
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    enforce("verify-email", email, 3)
+    user = db.query(User).filter(User.email == email).first()
+    if user and user.email_verified_at is None:
+        _mail_verification(db, user, request, background)
+    return {"detail": "If that address has an account waiting for confirmation, a new link is on its way."}
 
 
 @router.post("/logout", status_code=204)
@@ -218,6 +309,11 @@ def delete_account(body: DeleteAccount, db: Session = Depends(get_db), principal
     user = db.get(User, principal.user_id)
     if not user or not verify_password(body.password or "", user.password_hash):
         raise HTTPException(403, "Incorrect password.")
+    delete_user(db, user)
+
+
+def delete_user(db: Session, user: User) -> None:
+    """Delete an account and everything it owns: chats, documents, vectors, tables, files, sign-ins."""
     from .cleanup import delete_session
     from .integration.pipeline import get_pipeline
     for session in db.query(ChatSession).filter(ChatSession.user_id == user.id).all():
@@ -225,3 +321,68 @@ def delete_account(body: DeleteAccount, db: Session = Depends(get_db), principal
     db.query(AuthToken).filter(AuthToken.user_id == user.id).delete()
     db.delete(user)
     db.commit()
+
+
+def set_password(db: Session, user: User, new_password: str, keep_token_id: str | None = None) -> int:
+    """Store a new password and end every sign-in of the account (except ``keep_token_id``). Returns how many."""
+    user.password_hash = hash_password(new_password)
+    query = db.query(AuthToken).filter(AuthToken.user_id == user.id)
+    if keep_token_id:
+        query = query.filter(AuthToken.id != keep_token_id)
+    revoked = query.delete()
+    db.commit()
+    return revoked
+
+
+@router.post("/forgot", status_code=202)
+def forgot_password(body: Forgot, request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    """Mail a single-use reset link. The answer is the same whether or not the address has an account."""
+    if not settings.auth_enabled or not mailer.configured():
+        raise HTTPException(501, "Password reset by e-mail is not set up on this server. Ask its administrator to reset it.")
+    email = (body.email or "").strip().lower()
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    enforce("forgot-email", email, 3)   # a few a minute per address, so nobody can use this to spam an inbox
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        db.query(PasswordReset).filter(PasswordReset.user_id == user.id, PasswordReset.used_at.is_(None)).delete()   # only the newest link works
+        db.add(PasswordReset(id=_digest(token), user_id=user.id, expires_at=now + timedelta(minutes=settings.reset_token_minutes)))
+        db.commit()
+        base = (settings.public_url or str(request.base_url)).rstrip("/")
+        background.add_task(mailer.send_quietly, user.email, "Reset your KNAVIS password",
+                            f"Someone asked to reset the password of this KNAVIS account.\n\nOpen this link to choose a new one "
+                            f"(it works once and expires in {settings.reset_token_minutes} minutes):\n\n{base}/#reset={token}\n\n"
+                            "If it was not you, ignore this message: your password is unchanged.")
+    return {"detail": "If that address has an account, a reset link is on its way."}
+
+
+@router.post("/reset", status_code=204)
+def reset_password_with_token(body: Reset, request: Request, db: Session = Depends(get_db)):
+    """Set a new password using a link from the e-mail. Ends every sign-in of the account."""
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    row = db.get(PasswordReset, _digest(body.token or ""))
+    now = datetime.now(timezone.utc)
+    expires = row.expires_at.replace(tzinfo=timezone.utc) if row and row.expires_at.tzinfo is None else (row.expires_at if row else None)
+    user = db.get(User, row.user_id) if row and row.used_at is None and expires > now else None
+    if not user:
+        raise HTTPException(400, "This reset link is invalid or has expired. Ask for a new one.")
+    check_new_password(body.new_password, user.email)
+    row.used_at = now
+    user.email_verified_at = user.email_verified_at or now   # the link reached the inbox, so the address is theirs
+    set_password(db, user, body.new_password)
+
+
+@router.post("/password", status_code=204)
+def change_password(body: ChangePassword, request: Request, db: Session = Depends(get_db),
+                    principal: Principal = Depends(current_principal)):
+    """Change your password. Every other sign-in of the account is ended; this one stays."""
+    if principal.user_id is None:
+        raise HTTPException(400, "Accounts are turned off on this server.")
+    enforce("auth", client_address(request), settings.rate_limit_auth_per_minute)
+    user = db.get(User, principal.user_id)
+    if not user or not verify_password(body.current_password or "", user.password_hash):
+        raise HTTPException(403, "Incorrect password.")
+    check_new_password(body.new_password, user.email)
+    token = _bearer(request)
+    set_password(db, user, body.new_password, _digest(token) if token else None)

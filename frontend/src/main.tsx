@@ -23,7 +23,7 @@ const ACTIONS:Record<string,{label:string;action:string}[]> = {
 };
 
 function App(){
-  const [auth,setAuth]=useState<{enabled:boolean;registrationOpen:boolean}|null>(null);
+  const [auth,setAuth]=useState<{enabled:boolean;registrationOpen:boolean;passwordReset:boolean;emailVerification:boolean}|null>(null);
   const [user,setUser]=useState<User|null>(null);
   const [models,setModels]=useState<Model[]>([]);
   const [sessions,setSessions]=useState<any[]>([]);
@@ -58,7 +58,7 @@ function App(){
         if(!c.auth_enabled) who={id:null,email:null};
         else if(getToken()){ try{ who=await api("/auth/me"); }catch{ setToken(null); } }
         setUser(who);
-        setAuth({enabled:c.auth_enabled,registrationOpen:c.registration_open});
+        setAuth({enabled:c.auth_enabled,registrationOpen:c.registration_open,passwordReset:!!c.password_reset,emailVerification:!!c.email_verification});
       }catch(e:any){ setError(e.message); }
     })();
   },[]);
@@ -179,6 +179,15 @@ function App(){
     signedOut();
   }
 
+  async function changePassword(){
+    const current_password=window.prompt("Your current password");
+    if(!current_password) return;
+    const new_password=window.prompt("New password (at least 8 characters). Your other devices will be signed out.");
+    if(!new_password) return;
+    try{ await api("/auth/password",{method:"POST",json:{current_password,new_password}}); setError("Password changed."); }
+    catch(e:any){ setError(e.message); }
+  }
+
   async function deleteAccount(){
     const password=window.prompt("This permanently deletes your account, chats and documents. Enter your password to confirm.");
     if(!password) return;
@@ -193,7 +202,7 @@ function App(){
   },[provider,models]);
 
   if(!auth) return <div className="auth-shell"><div className="auth-card"><div className="brand">KNAVIS</div>{error?<><div className="request-error" role="alert">{error}</div><button className="send" onClick={()=>location.reload()}>Try again</button></>:<p className="auth-lead">Loading…</p>}</div></div>;
-  if(!user) return <AuthScreen registrationOpen={auth.registrationOpen} onSignedIn={setUser}/>;
+  if(!user) return <AuthScreen registrationOpen={auth.registrationOpen} passwordReset={auth.passwordReset} emailVerification={auth.emailVerification} onSignedIn={setUser}/>;
 
   return <div className={`shell${menuOpen?" menu-open":""}`}>
     <aside className="sidebar">
@@ -215,7 +224,7 @@ function App(){
       </div>)}{active&&docs.length===0&&<small className="muted">Attach a file with 📎 to get started.</small>}</div>
       {user.email&&<div className="account">
         <small title={user.email}>{user.email}</small>
-        <div><button className="link" onClick={signOut}>Sign out</button><button className="link danger" onClick={deleteAccount}>Delete account</button></div>
+        <div><button className="link" onClick={signOut}>Sign out</button><button className="link" onClick={changePassword}>Change password</button><button className="link danger" onClick={deleteAccount}>Delete account</button></div>
       </div>}
     </aside>
     {menuOpen&&<div className="scrim" onClick={()=>setMenuOpen(false)}/>}
